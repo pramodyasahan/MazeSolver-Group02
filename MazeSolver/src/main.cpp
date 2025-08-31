@@ -24,3 +24,23 @@ void loop() {
   delay(500); // Delay for readability
 
 }
+
+void loop() {
+  // Clear the trigPin
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+
+  // Send 10µs HIGH pulse
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  // Read echo time (30ms timeout ~ 5m)
+  duration = pulseIn(echoPin, HIGH, 30000UL);
+
+  // Optional: calculate distance (already your friend’s issue)
+  distance = (duration * 0.0343) / 2;
+
+  delay(500); // readability
+}
+
