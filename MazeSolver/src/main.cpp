@@ -9,7 +9,15 @@ long duration;
 float distance;
 
 void setup() {
+  // Set pin mode
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
 
+  // Start Serial communication
+  Serial.begin(9600);
+  while (!Serial) { /* wait for native USB boards (e.g., Leonardo, Micro) */ }
+
+  Serial.println("Ultrasonic distance meter ready.");
 }
 
 void loop() {
