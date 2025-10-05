@@ -1,20 +1,47 @@
 #include <Arduino.h>
 
-// Motor Pins
-#define ENA 5
-#define IN1 6
-#define IN2 7
-#define ENB 9
-#define IN3 10
-#define IN4 11
+void rotateOneCycle(int pwmVal, bool clockwise);
+void stopMotors();
+long readUltrasonic(int trigPin, int echoPin);
+void countEncoderL();
+void countEncoderR();
+void turnLeft90(int pwmVal, float wheelBase, float wheelDiameter);
+void turnRight90(int pwmVal, float wheelBase, float wheelDiameter);
+
+// Motor Pins Left
+#define L_RPWM 4
+#define L_LPWM 5
+#define L_REN 6
+#define L_LEN 7
+
+// Motor Pins Right
+#define R_RPWM 2
+#define R_LPWM 3
+#define R_REN 9
+#define R_LEN 8
+
+// Encoder Pins
+#define L_ENC_A 18
+#define L_ENC_B 19
+#define R_ENC_A 20
+#define R_ENC_B 21
 
 // Ultrasonic Pins
 #define TRIG_FRONT 22
 #define ECHO_FRONT 23
-#define TRIG_LEFT 24
-#define ECHO_LEFT 25
+#define TRIG_LEFT 38
+#define ECHO_LEFT 39
 #define TRIG_RIGHT 26
 #define ECHO_RIGHT 27
+
+// Motor Control Parameters
+const int pulsesPerMotorRev = 11;    // Encoder ticks per motor shaft revolution
+const int gearRatio = 20;           // Example gear ratio, adjust for your motor
+const int countsPerRev = pulsesPerMotorRev * gearRatio; // Full output shaft revolution
+
+// Encoder Variables
+
+
 
 // IR Line Sensor Pins
 #define IR_LEFT A0
@@ -22,17 +49,9 @@
 #define IR_RIGHT A2
 
 // Mode Switch (optional)
-#define MODE_SWITCH 2  // HIGH = Line Following, LOW = Wall Following
+//#define MODE_SWITCH 40  // HIGH = Line Following, LOW = Wall Following
 
 
-long readUltrasonic(int trigPin, int echoPin) {
-  digitalWrite(trigPin, LOW); 
-  delayMicroseconds(2);
-  digitalWrite(trigPin, HIGH); 
-  delayMicroseconds(10);
-  digitalWrite(trigPin, LOW);
-  return pulseIn(echoPin, HIGH) / 58; // cm
-}
 
 void setMotor(int leftSpeed, int rightSpeed) {
   analogWrite(ENA, abs(leftSpeed));
@@ -45,22 +64,35 @@ void setMotor(int leftSpeed, int rightSpeed) {
 }
 
 void setup() {
-  // Motor pins
-  pinMode(ENA, OUTPUT); pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT);
-  pinMode(ENB, OUTPUT); pinMode(IN3, OUTPUT); pinMode(IN4, OUTPUT);
 
-  // Ultrasonic pins
+  // Ultrasonic setup
   pinMode(TRIG_FRONT, OUTPUT); pinMode(ECHO_FRONT, INPUT);
-  pinMode(TRIG_LEFT, OUTPUT); pinMode(ECHO_LEFT, INPUT);
+  pinMode(TRIG_LEFT, OUTPUT);  pinMode(ECHO_LEFT, INPUT);
   pinMode(TRIG_RIGHT, OUTPUT); pinMode(ECHO_RIGHT, INPUT);
 
-  // IR sensors
+  // IR Sensor setup
   pinMode(IR_LEFT, INPUT);
   pinMode(IR_CENTER, INPUT);
   pinMode(IR_RIGHT, INPUT);
+  
+  // Motor pins setup
+  pinMode(R_RPWM, OUTPUT);
+  pinMode(R_LPWM, OUTPUT);
+  pinMode(R_REN, OUTPUT);
+  pinMode(R_LEN, OUTPUT);
+
+  pinMode(L_RPWM, OUTPUT);
+  pinMode(L_LPWM, OUTPUT);
+  pinMode(L_REN, OUTPUT);
+  pinMode(L_LEN, OUTPUT);
+
+  digitalWrite(R_REN, HIGH);
+  digitalWrite(R_LEN, HIGH);
+  digitalWrite(L_REN, HIGH);
+  digitalWrite(L_LEN, HIGH);
 
   // Mode switch
-  pinMode(MODE_SWITCH, INPUT_PULLUP);
+  //pinMode(MODE_SWITCH, INPUT_PULLUP);
 
   Serial.begin(9600);
 }
@@ -114,57 +146,106 @@ void wallFollowing() {
   }
 }
 
+// ==================== Ultrasonic ====================
+long readUltrasonic(int trigPin, int echoPin) {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
 
-// // Define pins
-// const int trigPin = 2;
-// const int echoPin = 3;
+  long duration = pulseIn(echoPin, HIGH, 30000);
+  long distance = duration * 0.034 / 2;
+  return distance;
+}
 
-// // Variables for duration and distance
-// long duration;
-// float distance;
+// Stop motor
+void stopMotors() {
+  analogWrite(R_RPWM, 0);
+  analogWrite(R_LPWM, 0);
+  analogWrite(L_RPWM, 0);
+  analogWrite(L_LPWM, 0);
+  Serial.println("Motors stopped.");
+}
 
-// void setup() {
-//   // Set pin mode
-//   pinMode(trigPin, OUTPUT);
-//   pinMode(echoPin, INPUT);
+//---------------------------------------------------------------TURNING FUNCTIONS---------------------------------------------------------------------
 
-//   // Start Serial communication
-//   Serial.begin(9600);
-//   while (!Serial) { /* wait for native USB boards (e.g., Leonardo, Micro) */ }
+// ---- Turn Left 90 Degrees ----
+void turnLeft90(int pwmVal, float wheelBase, float wheelDiameter) {
+  encoderCountL = 0;
+  encoderCountR = 0;
 
-//   Serial.println("Ultrasonic distance meter ready.");
-// }
+  float wheelCircumference = PI * wheelDiameter;
+  float arcLength = (PI * wheelBase) / 4.0;   // distance each wheel must travel
+  float rotations = arcLength / wheelCircumference*2;
+  long counts90 = (long)(rotations * countsPerRev);
 
-// void loop() {
-//    // Calculate distance in cm (speed of sound = 343 m/s)
-//   distance = duration * 0.0343 / 2;
+  Serial.print("Target counts for 90 deg turn: ");
+  Serial.println(counts90);
 
-//   // Print the distance on Serial Monitor
-//   Serial.print("Distance: ");
-//   Serial.print(distance);
-//   Serial.println(" cm");
+  // Run wheels opposite directions
+  analogWrite(R_RPWM, pwmVal);
+  analogWrite(R_LPWM, 0);
+  analogWrite(L_RPWM, pwmVal);
+  analogWrite(L_LPWM, 0);
 
-//   delay(500); // Delay for readability
+  // Wait until both wheels have moved enough
+  while (abs(encoderCountR) < counts90 && abs(encoderCountL) < counts90) {
+    Serial.print("L: "); Serial.print(encoderCountL);
+    Serial.print(" | R: "); Serial.println(encoderCountR);
+  }
 
-// }
+  stopMotors();
+  Serial.println("Turn complete.");
+}
 
-// void loop() {
-//   // Clear the trigPin
-//   digitalWrite(trigPin, LOW);
-//   delayMicroseconds(2);
 
-//   // Send 10µs HIGH pulse
-//   digitalWrite(trigPin, HIGH);
-//   delayMicroseconds(10);
-//   digitalWrite(trigPin, LOW);
+// ---- Turn Right 90 Degrees ----
 
-//   // Read echo time (30ms timeout ~ 5m)
-//   duration = pulseIn(echoPin, HIGH, 30000UL);
+void turnRight90(int pwmVal, float wheelBase, float wheelDiameter) {
+  encoderCountL = 0;
+  encoderCountR = 0;
 
-//   // Optional: calculate distance (already your friend’s issue)
-//   distance = (duration * 0.0343) / 2;
+  float wheelCircumference = PI * wheelDiameter;
+  float arcLength = (PI * wheelBase) / 4.0;   // distance each wheel must travel
+  float rotations = arcLength / wheelCircumference*2;
+  long counts90 = (long)(rotations * countsPerRev);
 
-//   delay(500); // readability
-// }
+  Serial.print("Target counts for 90 deg turn: ");
+  Serial.println(counts90);
 
+  // Run wheels opposite directions
+  analogWrite(R_RPWM, 0);
+  analogWrite(R_LPWM, pwmVal);
+  analogWrite(L_RPWM, 0);
+  analogWrite(L_LPWM, pwmVal);
+
+  // Wait until both wheels have moved enough
+  while (abs(encoderCountR) < counts90 && abs(encoderCountL) < counts90) {
+    Serial.print("L: "); Serial.print(encoderCountL);
+    Serial.print(" | R: "); Serial.println(encoderCountR);
+  }
+
+  stopMotors();
+  Serial.println("Turn complete.");
+}
+
+//Rotate motor for one output shaft revolution
+void rotateOneCycle(int pwmVal, bool clockwise) {
+  encoderCount = 0; // Reset encoder count
+  if (clockwise) {
+    analogWrite(R_RPWM, pwmVal);
+    analogWrite(R_LPWM, 0);
+    Serial.println("Rotating Clockwise...");
+  } else {
+    analogWrite(R_RPWM, 0);
+    analogWrite(R_LPWM, pwmVal);
+    Serial.println("Rotating Counter-Clockwise...");
+  }
+
+  while (encoderCount < countsPerRev) {
+    Serial.print("Count L : "); Serial.print(encoderCount);
+    // Wait for one full rotation
+  }
+}
 
