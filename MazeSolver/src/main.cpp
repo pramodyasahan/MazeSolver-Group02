@@ -7,6 +7,9 @@ void countEncoderL();
 void countEncoderR();
 void turnLeft90(int pwmVal, float wheelBase, float wheelDiameter);
 void turnRight90(int pwmVal, float wheelBase, float wheelDiameter);
+void moveForward(int pwmValR, int pwmValL);
+void moveBackward(int pwmVal);
+
 
 // Motor Pins Left
 #define L_RPWM 4
@@ -40,7 +43,8 @@ const int gearRatio = 20;           // Example gear ratio, adjust for your motor
 const int countsPerRev = pulsesPerMotorRev * gearRatio; // Full output shaft revolution
 
 // Encoder Variables
-
+volatile long encoderCountL = 0;
+volatile long encoderCountR = 0;
 
 
 // IR Line Sensor Pins
@@ -93,16 +97,74 @@ void setup() {
 
   // Mode switch
   //pinMode(MODE_SWITCH, INPUT_PULLUP);
+  pinMode(L_ENC_A, INPUT_PULLUP);
+  pinMode(L_ENC_B, INPUT_PULLUP);
+  pinMode(R_ENC_A, INPUT_PULLUP);
+  pinMode(R_ENC_B, INPUT_PULLUP);
 
+  attachInterrupt(digitalPinToInterrupt(L_ENC_A), countEncoderL, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(R_ENC_A), countEncoderR, CHANGE);
   Serial.begin(9600);
+  Serial.println("Starting rotation control...");
+
+
+  
 }
 
 void loop() {
-  bool mode = digitalRead(MODE_SWITCH); // HIGH = Line, LOW = Wall
-  if (mode) {
-    lineFollowing();
-  } else {
-    wallFollowing();
+  //bool mode = digitalRead(MODE_SWITCH); // HIGH = Line, LOW = Wall
+  //if (mode) {
+   // lineFollowing();
+  //} else {
+   // wallFollowing();
+  //}
+  //Read ultrasonic distances
+  long dFront = readUltrasonic(TRIG_FRONT, ECHO_FRONT);
+  long dLeft  = readUltrasonic(TRIG_LEFT,  ECHO_LEFT);
+  long dRight = readUltrasonic(TRIG_RIGHT, ECHO_RIGHT);
+
+  Serial.print("Front: "); Serial.print(dFront);
+  delay(1000);
+  Serial.print(" | Left: "); Serial.print(dLeft);
+  delay(1000);
+  Serial.print(" | Right: "); Serial.println(dRight);
+  delay(1000);
+
+  if (dFront < obstacleDist) {
+    stopMotors();
+    delay(1000);
+    if (dLeft > dRight+10) {
+      Serial.println("Obstacle ahead → Turning Left");
+      turnLeft90(50, 17, 6.5); // Example wheelbase and diameter
+      stopMotors();
+      delay(1000);
+    }
+    else if (dRight > dLeft+10) {
+      Serial.println("Obstacle ahead → Turning Right");
+        turnRight90(50, 17, 6.5); // Example wheelbase and diameter
+        stopMotors();
+        delay(1000);
+    }
+    else {
+      Serial.println("Dead end → Turning Around");
+      //turnLeftCounts(speedPWM, 180);  // precise 180°
+    }
+  }
+  else {
+    Serial.println("Path clear → Moving Forward");
+    if (dLeft < 4) {
+      moveForward(30,60);
+      delay(100);
+    }
+    else if (dRight < 4) {
+      moveForward(60,30);
+      delay(100);
+    }
+    else {
+      moveForward(30,30);
+    }
+    
+    
   }
 }
 
@@ -247,5 +309,46 @@ void rotateOneCycle(int pwmVal, bool clockwise) {
     Serial.print("Count L : "); Serial.print(encoderCount);
     // Wait for one full rotation
   }
+  void countEncoderL() {
+  int A = digitalRead(L_ENC_A);
+  int B = digitalRead(L_ENC_B);
+
+  if (A == B) {
+    encoderCountL++;
+  } else {
+    encoderCountL--;
+  }
+}
+
+// ---- ISR for Right Encoder ----
+void countEncoderR() {
+  int A = digitalRead(R_ENC_A);
+  int B = digitalRead(R_ENC_B);
+
+  if (A == B) {
+    encoderCountR++;
+  } else {
+    encoderCountR--;
+  }
+
+
+}
+void moveBackward(int pwmVal) {
+  analogWrite(R_RPWM, 0); 
+  analogWrite(R_LPWM, pwmVal);
+  analogWrite(L_RPWM, pwmVal); 
+  analogWrite(L_LPWM, 0);
+}
+
+void moveForward(int pwmValR, int pwmValL) {
+
+  analogWrite(R_RPWM, pwmValR); 
+  analogWrite(R_LPWM, 0);
+  analogWrite(L_RPWM, 0); 
+  analogWrite(L_LPWM, pwmValL);
+}
+
+
+
 }
 
