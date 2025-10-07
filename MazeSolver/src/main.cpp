@@ -9,6 +9,9 @@ void turnLeft90(int pwmVal, float wheelBase, float wheelDiameter);
 void turnRight90(int pwmVal, float wheelBase, float wheelDiameter);
 void moveForward(int pwmValR, int pwmValL);
 void moveBackward(int pwmVal);
+void readSensors();
+int getLineError();
+
 
 
 // Motor Pins Left
@@ -47,25 +50,20 @@ volatile long encoderCountL = 0;
 volatile long encoderCountR = 0;
 
 
-// IR Line Sensor Pins
-#define IR_LEFT A0
-#define IR_CENTER A1
-#define IR_RIGHT A2
+// IR Sensor Array 
+const int sensorPins[8] = {30, 31, 32, 33, 34, 35, 36, 37}; 
+int sensorValues[8];
+
+// PID Parameters 
+float Kp = 15.0;         // Proportional gain 
+int baseSpeed = 80;      // Base speed for motors
+int maxPWM = 150;        // Max PWM limit
+
 
 // Mode Switch (optional)
 //#define MODE_SWITCH 40  // HIGH = Line Following, LOW = Wall Following
 
 
-
-void setMotor(int leftSpeed, int rightSpeed) {
-  analogWrite(ENA, abs(leftSpeed));
-  analogWrite(ENB, abs(rightSpeed));
-
-  digitalWrite(IN1, leftSpeed > 0);
-  digitalWrite(IN2, leftSpeed < 0);
-  digitalWrite(IN3, rightSpeed > 0);
-  digitalWrite(IN4, rightSpeed < 0);
-}
 
 void setup() {
 
@@ -107,9 +105,15 @@ void setup() {
   Serial.begin(9600);
   Serial.println("Starting rotation control...");
 
+  // --- Sensor setup ---
+  // for (int i = 0; i < 8; i++) {
+  //   pinMode(sensorPins[i], INPUT);
+  // }
 
-  
+  // Serial.println("8-Channel IR Line Following Initialized...");
 }
+
+
 
 void loop() {
   //bool mode = digitalRead(MODE_SWITCH); // HIGH = Line, LOW = Wall
@@ -164,6 +168,31 @@ void loop() {
       moveForward(30,30);
     }
     
+  //    // Step 1: Read all sensors
+  // readSensors();
+
+  // // Step 2: Compute line error
+  // int error = getLineError();
+
+  // // Step 3: Apply proportional control
+  // int correction = Kp * error;
+
+  // int leftSpeed = baseSpeed - correction;
+  // int rightSpeed = baseSpeed + correction;
+
+  // leftSpeed = constrain(leftSpeed, 0, maxPWM);
+  // rightSpeed = constrain(rightSpeed, 0, maxPWM);
+
+  // // Step 4: Drive motors
+  // moveForward(leftSpeed, rightSpeed);
+
+  // // Debug output
+  // Serial.print("Error: "); Serial.print(error);
+  // Serial.print(" | L_PWM: "); Serial.print(leftSpeed);
+  // Serial.print(" | R_PWM: "); Serial.println(rightSpeed);
+
+  // delay(10);
+
     
   }
 }
@@ -346,6 +375,38 @@ void moveForward(int pwmValR, int pwmValL) {
   analogWrite(R_LPWM, 0);
   analogWrite(L_RPWM, 0); 
   analogWrite(L_LPWM, pwmValL);
+}
+
+// ---------- Read IR Sensor Values ----------
+void readSensors() {
+  for (int i = 0; i < 8; i++) {
+    sensorValues[i] = digitalRead(sensorPins[i]);
+  }
+}
+
+// ---------- Compute Line Error ----------
+int getLineError() {
+  long weightedSum = 0;
+  long total = 0;
+
+  // For each sensor: LOW = black line, HIGH = white background
+  for (int i = 0; i < 8; i++) {
+    int value = (sensorValues[i] == LOW) ? 1 : 0;
+    weightedSum += (long)value * i * 1000; // Weighted by position
+    total += value;
+  }
+
+  // If no sensor detects the line → stop motors
+  if (total == 0) {
+    stopMotors();
+    Serial.println("Line lost! Stopping...");
+    delay(300);
+    return 0;
+  }
+
+  long position = weightedSum / total;     // Center of black line
+  int error = position - (3.5 * 1000);     // Deviation from center
+  return error / 1000;                     // Simplify scaling
 }
 
 
