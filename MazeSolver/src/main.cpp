@@ -11,6 +11,8 @@ void moveForward(int pwmValR, int pwmValL);
 void moveBackward(int pwmVal);
 void readSensors();
 int getLineError();
+void setMotorSpeeds(int leftSpeed, int rightSpeed);
+void stopMotors();
 
 
 
@@ -51,13 +53,23 @@ volatile long encoderCountR = 0;
 
 
 // IR Sensor Array 
-const int sensorPins[8] = {30, 31, 32, 33, 34, 35, 36, 37}; 
+const int sensorPins[8] = {22, 23, 24, 25, 26, 27, 28, 29}; 
 int sensorValues[8];
 
-// PID Parameters 
-float Kp = 15.0;         // Proportional gain 
-int baseSpeed = 80;      // Base speed for motors
-int maxPWM = 150;        // Max PWM limit
+
+// ====================== PID Parameters ======================
+float Kp = 10.0;     // Proportional gain
+float Ki = 0.0;      // Integral gain
+float Kd = 2.0;      // Derivative gain
+
+int baseSpeed = 30;  // Base motor speed (PWM)
+int maxPWM = 60;    // Maximum allowed PWM
+
+// ====================== Variables for PID ======================
+float error = 0, lastError = 0;
+float integral = 0;
+float derivative = 0;
+float correction = 0;
 
 
 // Mode Switch (optional)
@@ -104,6 +116,16 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(R_ENC_A), countEncoderR, CHANGE);
   Serial.begin(9600);
   Serial.println("Starting rotation control...");
+
+    Serial.begin(9600);
+
+
+  // --- Sensor setup ---
+  for (int i = 0; i < 8; i++) {
+    pinMode(sensorPins[i], INPUT);
+  }
+
+  Serial.println("PID Line Following Robot Initialized...");
 
   // --- Sensor setup ---
   // for (int i = 0; i < 8; i++) {
@@ -192,190 +214,35 @@ void loop() {
   // Serial.print(" | R_PWM: "); Serial.println(rightSpeed);
 
   // delay(10);
-
-    
-  }
-}
-
-void lineFollowing() {
-  int left = analogRead(IR_LEFT);
-  int center = analogRead(IR_CENTER);
-  int right = analogRead(IR_RIGHT);
-
-  // Thresholds may need tuning
-  bool onLeft = left < 500;
-  bool onCenter = center < 500;
-  bool onRight = right < 500;
-
-  if (onCenter && !onLeft && !onRight) {
-    setMotor(150, 150); // Forward
-  } else if (onLeft) {
-    setMotor(100, 150); // Turn right
-  } else if (onRight) {
-    setMotor(150, 100); // Turn left
-  } else {
-    setMotor(0, 0); // Stop or search
-  }
-}
-
-void wallFollowing() {
-  long front = readUltrasonic(TRIG_FRONT, ECHO_FRONT);
-  long left = readUltrasonic(TRIG_LEFT, ECHO_LEFT);
-  long right = readUltrasonic(TRIG_RIGHT, ECHO_RIGHT);
-
-  if (front < 15) {
-    setMotor(-100, -100); // Back up
-    delay(300);
-    setMotor(100, -100); // Turn
-    delay(300);
-  } else if (left < 10) {
-    setMotor(150, 100); // Turn right slightly
-  } else if (right < 10) {
-    setMotor(100, 150); // Turn left slightly
-  } else {
-    setMotor(150, 150); // Move forward
-  }
-}
-
-// ==================== Ultrasonic ====================
-long readUltrasonic(int trigPin, int echoPin) {
-  digitalWrite(trigPin, LOW);
-  delayMicroseconds(2);
-  digitalWrite(trigPin, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(trigPin, LOW);
-
-  long duration = pulseIn(echoPin, HIGH, 30000);
-  long distance = duration * 0.034 / 2;
-  return distance;
-}
-
-// Stop motor
-void stopMotors() {
-  analogWrite(R_RPWM, 0);
-  analogWrite(R_LPWM, 0);
-  analogWrite(L_RPWM, 0);
-  analogWrite(L_LPWM, 0);
-  Serial.println("Motors stopped.");
-}
-
-//---------------------------------------------------------------TURNING FUNCTIONS---------------------------------------------------------------------
-
-// ---- Turn Left 90 Degrees ----
-void turnLeft90(int pwmVal, float wheelBase, float wheelDiameter) {
-  encoderCountL = 0;
-  encoderCountR = 0;
-
-  float wheelCircumference = PI * wheelDiameter;
-  float arcLength = (PI * wheelBase) / 4.0;   // distance each wheel must travel
-  float rotations = arcLength / wheelCircumference*2;
-  long counts90 = (long)(rotations * countsPerRev);
-
-  Serial.print("Target counts for 90 deg turn: ");
-  Serial.println(counts90);
-
-  // Run wheels opposite directions
-  analogWrite(R_RPWM, pwmVal);
-  analogWrite(R_LPWM, 0);
-  analogWrite(L_RPWM, pwmVal);
-  analogWrite(L_LPWM, 0);
-
-  // Wait until both wheels have moved enough
-  while (abs(encoderCountR) < counts90 && abs(encoderCountL) < counts90) {
-    Serial.print("L: "); Serial.print(encoderCountL);
-    Serial.print(" | R: "); Serial.println(encoderCountR);
+ 
   }
 
-  stopMotors();
-  Serial.println("Turn complete.");
+  // Step 1: Read all sensors
+  readSensors();
+
+  // Step 2: Compute line error
+  error = getLineError();
+
+  // Step 3: PID Calculations
+  integral += error;                // Accumulate error
+  derivative = error - lastError;   // Change in error
+  correction = (Kp * error) + (Ki * integral) + (Kd * derivative);
+
+  lastError = error;
+
+  // Step 4: Compute motor speeds
+  int leftSpeed = baseSpeed - correction;
+  int rightSpeed = baseSpeed + correction;
+
+  leftSpeed = constrain(leftSpeed, 0, maxPWM);
+  rightSpeed = constrain(rightSpeed, 0, maxPWM);
+
+  // Step 5: Apply speeds
+  setMotorSpeeds(leftSpeed, rightSpeed);
 }
 
 
-// ---- Turn Right 90 Degrees ----
 
-void turnRight90(int pwmVal, float wheelBase, float wheelDiameter) {
-  encoderCountL = 0;
-  encoderCountR = 0;
-
-  float wheelCircumference = PI * wheelDiameter;
-  float arcLength = (PI * wheelBase) / 4.0;   // distance each wheel must travel
-  float rotations = arcLength / wheelCircumference*2;
-  long counts90 = (long)(rotations * countsPerRev);
-
-  Serial.print("Target counts for 90 deg turn: ");
-  Serial.println(counts90);
-
-  // Run wheels opposite directions
-  analogWrite(R_RPWM, 0);
-  analogWrite(R_LPWM, pwmVal);
-  analogWrite(L_RPWM, 0);
-  analogWrite(L_LPWM, pwmVal);
-
-  // Wait until both wheels have moved enough
-  while (abs(encoderCountR) < counts90 && abs(encoderCountL) < counts90) {
-    Serial.print("L: "); Serial.print(encoderCountL);
-    Serial.print(" | R: "); Serial.println(encoderCountR);
-  }
-
-  stopMotors();
-  Serial.println("Turn complete.");
-}
-
-//Rotate motor for one output shaft revolution
-void rotateOneCycle(int pwmVal, bool clockwise) {
-  encoderCount = 0; // Reset encoder count
-  if (clockwise) {
-    analogWrite(R_RPWM, pwmVal);
-    analogWrite(R_LPWM, 0);
-    Serial.println("Rotating Clockwise...");
-  } else {
-    analogWrite(R_RPWM, 0);
-    analogWrite(R_LPWM, pwmVal);
-    Serial.println("Rotating Counter-Clockwise...");
-  }
-
-  while (encoderCount < countsPerRev) {
-    Serial.print("Count L : "); Serial.print(encoderCount);
-    // Wait for one full rotation
-  }
-  void countEncoderL() {
-  int A = digitalRead(L_ENC_A);
-  int B = digitalRead(L_ENC_B);
-
-  if (A == B) {
-    encoderCountL++;
-  } else {
-    encoderCountL--;
-  }
-}
-
-// ---- ISR for Right Encoder ----
-void countEncoderR() {
-  int A = digitalRead(R_ENC_A);
-  int B = digitalRead(R_ENC_B);
-
-  if (A == B) {
-    encoderCountR++;
-  } else {
-    encoderCountR--;
-  }
-
-
-}
-void moveBackward(int pwmVal) {
-  analogWrite(R_RPWM, 0); 
-  analogWrite(R_LPWM, pwmVal);
-  analogWrite(L_RPWM, pwmVal); 
-  analogWrite(L_LPWM, 0);
-}
-
-void moveForward(int pwmValR, int pwmValL) {
-
-  analogWrite(R_RPWM, pwmValR); 
-  analogWrite(R_LPWM, 0);
-  analogWrite(L_RPWM, 0); 
-  analogWrite(L_LPWM, pwmValL);
-}
 
 // ---------- Read IR Sensor Values ----------
 void readSensors() {
@@ -389,27 +256,40 @@ int getLineError() {
   long weightedSum = 0;
   long total = 0;
 
-  // For each sensor: LOW = black line, HIGH = white background
   for (int i = 0; i < 8; i++) {
-    int value = (sensorValues[i] == LOW) ? 1 : 0;
-    weightedSum += (long)value * i * 1000; // Weighted by position
+    int value = (sensorValues[i] == LOW) ? 1 : 0;  // LOW = black line
+    weightedSum += (long)value * i * 1000;
     total += value;
   }
 
-  // If no sensor detects the line → stop motors
   if (total == 0) {
+    // Line lost → Stop motors and hold last known position
     stopMotors();
     Serial.println("Line lost! Stopping...");
-    delay(300);
-    return 0;
+    delay(200);
+    return lastError; // Maintain previous error to recover
   }
 
-  long position = weightedSum / total;     // Center of black line
-  int error = position - (3.5 * 1000);     // Deviation from center
-  return error / 1000;                     // Simplify scaling
+  long position = weightedSum / total;
+  int currentError = position - (3.5 * 1000);  // Center = 3.5 index
+  return currentError / 1000;
 }
 
+// ---------- Set Motor Speeds ----------
+void setMotorSpeeds(int leftSpeed, int rightSpeed) {
+  // Right motor forward
+  analogWrite(R_RPWM, rightSpeed);
+  analogWrite(R_LPWM, 0);
 
-
+  // Left motor forward
+  analogWrite(L_RPWM, 0);
+  analogWrite(L_LPWM, leftSpeed);
 }
 
+// ---------- Stop Motors ----------
+void stopMotors() {
+  analogWrite(R_RPWM, 0);
+  analogWrite(R_LPWM, 0);
+  analogWrite(L_RPWM, 0);
+  analogWrite(L_LPWM, 0);
+ }
