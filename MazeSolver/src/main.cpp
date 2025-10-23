@@ -11,7 +11,8 @@ void moveForward(int pwmValR, int pwmValL);
 void moveBackward(int pwmVal);
 void pivotLeft(int pwmVal);
 void pivotRight(int pwmVal);
-void pivot180(int pwmVal); // <<< NEW: Declaration for the 180-degree pivot function
+void pivot180(int pwmVal);
+void moveForwardDistance(int distance_cm, int pwmVal); // <<< NEW: Declaration for moving a set distance
 
 // ==================== Pin Definitions ====================
 #define TRIG_FRONT 48
@@ -48,12 +49,14 @@ const int countsPerRev      = pulsesPerMotorRev * gearRatio * 2; // 11*20*2 = 44
 // ==================== Turning Configuration ====================
 const int   TURN_PWM       = 50;     // outer wheel PWM during arc
 const float TURN_RADIUS_CM = 10.0f;  // robot center arc radius; if too small we pivot
-const int   PIVOT_180_PWM  = 55;     // <<< NEW: PWM for the 180-degree turn
+const int   PIVOT_180_PWM  = 55;
 
 // ==================== Navigation Thresholds ====================
 const int OBSTACLE_THRESHOLD      = 12; // start turn when front < 16 cm
 const int OPEN_SPACE_THRESHOLD_CM = 50; // side "very open" heuristic
-const int DEAD_END_THRESHOLD      = 12; // <<< NEW: Threshold for detecting a dead end on all sides
+const int DEAD_END_THRESHOLD      = 12;
+const int NO_WALL_THRESHOLD       = 30; // Threshold to determine if there's no wall on the left
+const int CORNER_CLEARANCE_CM     = 5; // <<< NEW: Distance to move forward before turning at an open corner
 
 // ==================== Wall Following ====================
 const int   BASE_PWM_STRAIGHT = 60;
@@ -116,8 +119,7 @@ void loop() {
   Serial.print(" L:"); Serial.print(dLeft);
   Serial.print(" R:"); Serial.println(dRight);
 
-  // ---------- NEW STATE 1: Dead End / Trapped ----------
-  // This must be checked first, as it's the highest priority.
+  // ---------- STATE 1: Dead End / Trapped ----------
   if (frontValid && dFront < DEAD_END_THRESHOLD &&
       leftValid  && dLeft  < DEAD_END_THRESHOLD &&
       rightValid && dRight < DEAD_END_THRESHOLD)
@@ -125,7 +127,7 @@ void loop() {
       Serial.println("--- DEAD END: Executing 180 turn ---");
       stopMotors();
       delay(200);
-      pivot180(PIVOT_180_PWM); // Call the new 180-degree turn function
+      pivot180(PIVOT_180_PWM);
       stopMotors();
       delay(200);
   }
@@ -157,58 +159,54 @@ void loop() {
     stopMotors();
     delay(150);
   }
-  // ---------- STATE 3: Path clear (wall following) ----------
+  // ---------- STATE 3: No wall on the left, so turn left ----------
+  else if (leftValid && dLeft > NO_WALL_THRESHOLD) {
+    Serial.println("--- No left wall. Clearing corner... ---");
+    // Move forward a set distance to ensure the robot's center is past the corner
+    moveForwardDistance(CORNER_CLEARANCE_CM, BASE_PWM_STRAIGHT);
+    
+    Serial.println("--- Corner cleared. Initiating left turn. ---");
+    stopMotors(); // Ensure motors are stopped before turning
+    delay(10);
+    smoothTurnLeft();
+    stopMotors();
+    delay(150);
+  }
+  // ---------- STATE 4: Path clear (wall following) ----------
   else {
     int leftSpeed, rightSpeed;
 
-    // Case 1: Both walls are visible — maintain equal distance
     if (leftValid && rightValid && dLeft < WALL_DETECT_RANGE && dRight < WALL_DETECT_RANGE) {
-      int error = (int)(dLeft - dRight);         // +ve → closer to right wall, need correction left
+      int error = (int)(dLeft - dRight);
       int correction = (int)(Kp * error);
       correction = constrain(correction, -MAX_CORRECTION, MAX_CORRECTION);
-
       leftSpeed  = constrain(BASE_PWM_STRAIGHT - correction, 0, 100);
       rightSpeed = constrain(BASE_PWM_STRAIGHT + correction, 0, 100);
-
-      Serial.print("Dual Wall Follow | Error: ");
-      Serial.println(error);
+      Serial.print("Dual Wall Follow | Error: "); Serial.println(error);
     }
-
-    // Case 2: Only left wall detected — maintain 6 cm from it
     else if (leftValid && dLeft < 10) {
-      int targetDist = 6; // cm
+      int targetDist = 6;
       int error = (int)(dLeft - targetDist);
       int correction = (int)(Kp * error);
       correction = constrain(correction, -MAX_CORRECTION, MAX_CORRECTION);
-
       leftSpeed  = constrain(BASE_PWM_STRAIGHT + correction, 0, 100);
       rightSpeed = constrain(BASE_PWM_STRAIGHT - correction, 0, 100);
-
-      Serial.print("Left Wall Follow | Error: ");
-      Serial.println(error);
+      Serial.print("Left Wall Follow | Error: "); Serial.println(error);
     }
-
-    // Case 3: Only right wall detected — maintain 6 cm from it
     else if (rightValid && dRight < 10) {
-      int targetDist = 6; // cm
+      int targetDist = 6;
       int error = (int)(targetDist - dRight);
       int correction = (int)(Kp * error);
       correction = constrain(correction, -MAX_CORRECTION, MAX_CORRECTION);
-
       leftSpeed  = constrain(BASE_PWM_STRAIGHT - correction, 0, 100);
       rightSpeed = constrain(BASE_PWM_STRAIGHT + correction, 0, 100);
-
-      Serial.print("Right Wall Follow | Error: ");
-      Serial.println(error);
+      Serial.print("Right Wall Follow | Error: "); Serial.println(error);
     }
-
-    // Case 4: No nearby wall — move straight
     else {
       leftSpeed = BASE_PWM_STRAIGHT;
       rightSpeed = BASE_PWM_STRAIGHT;
-      Serial.println("No wall detected → Straight");
+      Serial.println("No wall detected -> Straight");
     }
-
     moveForward(rightSpeed, leftSpeed);
   }
   
@@ -216,42 +214,66 @@ void loop() {
 }
 
 // ===============================================================
-//             NEW: 180 Degree Encoder-Based Pivot
+//             NEW: Encoder-Based Forward Movement
+// ===============================================================
+void moveForwardDistance(int distance_cm, int pwmVal) {
+  // Calculate target encoder counts
+  const float wheelCircumference = PI * WHEEL_DIAMETER_CM;
+  const long targetCounts = (long)(((float)distance_cm / wheelCircumference) * countsPerRev);
+
+  Serial.print("Moving forward ");
+  Serial.print(distance_cm);
+  Serial.print("cm (");
+  Serial.print(targetCounts);
+  Serial.println(" counts)");
+
+  // Reset encoders safely
+  noInterrupts();
+  encoderCountL = 0;
+  encoderCountR = 0;
+  interrupts();
+
+  moveForward(pwmVal, pwmVal);
+
+  // Wait until the average distance of both wheels is met
+  while (true) {
+    noInterrupts();
+    long currentL = encoderCountL;
+    long currentR = encoderCountR;
+    interrupts();
+    
+    if ((absl(currentL) + absl(currentR)) / 2 >= targetCounts) {
+      break;
+    }
+    delay(10);
+  }
+
+  stopMotors();
+  Serial.println("Target distance reached.");
+}
+
+
+// ===============================================================
+//             180 Degree Encoder-Based Pivot
 // ===============================================================
 void pivot180(int pwmVal) {
-  // --- Calculate the required encoder counts for a 180-degree turn ---
-  // The distance each wheel must travel is half the circumference of the circle
-  // defined by the robot's wheelbase.
-  // Distance = PI * (WHEEL_BASE_CM / 2)
   const float wheelCircumference = PI * WHEEL_DIAMETER_CM;
   const float turnDistance = PI * (WHEEL_BASE_CM / 2.0f);
-  
-  // Convert distance to encoder counts
   const long targetCounts = (long)((turnDistance / wheelCircumference) * countsPerRev);
 
   Serial.print("Target Counts for 180 pivot: "); Serial.println(targetCounts);
 
-  // Reset encoders to 0
   encoderCountL = 0;
   encoderCountR = 0;
 
-  // Start the pivot (e.g., to the right)
   pivotRight(pwmVal);
 
-  // Loop until both wheels have traveled the required distance
   while(absl(encoderCountL) < targetCounts || absl(encoderCountR) < targetCounts) {
-    // You could add sync logic here, but for a simple pivot it's often not needed.
-    // Stop individual motors if they overshoot, to let the other catch up.
-    if (absl(encoderCountL) >= targetCounts) {
-      stopLeft();
-    }
-    if (absl(encoderCountR) >= targetCounts) {
-      stopRight();
-    }
+    if (absl(encoderCountL) >= targetCounts) { stopLeft(); }
+    if (absl(encoderCountR) >= targetCounts) { stopRight(); }
     delay(5);
   }
   
-  // Ensure motors are stopped
   stopMotors();
   Serial.println("180 turn complete.");
 }
@@ -260,7 +282,6 @@ void pivot180(int pwmVal) {
 // ===============================================================
 //                  TURNING (Arc with sync + stop-on-reach)
 // ===============================================================
-// Note: This function remains unchanged.
 static void smoothTurnArc90(bool leftTurn, float Rc_cm, int pwmOuterMax) {
   const float B = WHEEL_BASE_CM;
   const float R_inner = Rc_cm - (B / 2.0f);
@@ -351,27 +372,22 @@ void stopMotors() {
   stopRight(); stopLeft();
 }
 
-// Pin Mapping Reminder:
-// R_RPWM = Right Forward, R_LPWM = Right Backward
-// L_LPWM = Left Forward,  L_RPWM = Left Backward
 void moveForward(int pwmValR, int pwmValL) {
   analogWrite(R_RPWM, pwmValR); analogWrite(R_LPWM, 0);
   analogWrite(L_RPWM, 0);       analogWrite(L_LPWM, pwmValL);
 }
 
 void moveBackward(int pwmVal) {
-  analogWrite(R_RPWM, 0);       analogWrite(R_LPWM, pwmVal); // right backward
-  analogWrite(L_RPWM, pwmVal);  analogWrite(L_LPWM, 0);      // left backward
+  analogWrite(R_RPWM, 0);       analogWrite(R_LPWM, pwmVal);
+  analogWrite(L_RPWM, pwmVal);  analogWrite(L_LPWM, 0);
 }
 
 void pivotLeft(int pwmVal) {
-  // CCW: right forward, left backward
   analogWrite(R_RPWM, pwmVal); analogWrite(R_LPWM, 0);
-  analogWrite(L_RPWM, pwmVal); analogWrite(L_LPWM, 0); // <<< CORRECTED: Was L_LPWM, now correctly L_RPWM for backward
+  analogWrite(L_RPWM, pwmVal); analogWrite(L_LPWM, 0);
 }
 
 void pivotRight(int pwmVal) {
-  // CW: left forward, right backward
   analogWrite(L_RPWM, 0);      analogWrite(L_LPWM, pwmVal);
   analogWrite(R_RPWM, 0);      analogWrite(R_LPWM, pwmVal);
 }
@@ -386,7 +402,6 @@ long readUltrasonic(int trigPin, int echoPin) {
   return distance;
 }
 
-// Encoders
 void countEncoderL() {
   int A = digitalRead(L_ENC_A);
   int B = digitalRead(L_ENC_B);
@@ -397,9 +412,6 @@ void countEncoderL() {
 void countEncoderR() {
   int A = digitalRead(R_ENC_A);
   int B = digitalRead(R_ENC_B);
-  // Assuming encoders are mounted mirrored, one will spin the opposite way.
-  // This inverts the count so both count positive for forward motion.
-  // If your robot pivots the wrong way, swap the ++ and -- here.
   if (A == B) { encoderCountR--; } 
   else        { encoderCountR++; }
 }
