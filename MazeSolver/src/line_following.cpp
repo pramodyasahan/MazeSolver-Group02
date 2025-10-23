@@ -26,13 +26,13 @@ const uint8_t sensorPins[8] = {22, 23, 24, 25, 26, 27, 28, 29};
 
 /* ========================= PID ========================= */
 // Tune on your robot. Units are relative to sensor weighting below.
-float Kp = 40.0f;
+float Kp = 10.0f;
 float Ki = 0.0f;
 float Kd = 4.0f;
 
 int   baseSpeed = 60;     // forward PWM at zero error
 int   maxPWM    = 100;    // clamp each wheel
-int   maxCorr   = 120;    // clamp |correction| contribution
+int   maxCorr   = 20;    // clamp |correction| contribution
 float emaAlpha  = 0.25f;  // smoothing on error (0..1). 0.25 = mild smoothing
 
 // PID state
@@ -43,9 +43,9 @@ float integ = 0;
 enum LFState { FOLLOW, HARD_LEFT, HARD_RIGHT, SEARCH };
 LFState state = FOLLOW;
 
-int   turnPWM        = 120; // in-place pivot PWM for hard corners/search
+int   turnPWM        = 100; // in-place pivot PWM for hard corners/search
 int   reacquireCount = 3;   // require N consecutive "center seen" ticks to exit a turn
-int   lineLostSpinMs = 20;  // spin step while searching
+int   lineLostSpinMs = 15;  // spin step while searching
 bool  lastWasLeft    = false; // for search direction
 
 // If using encoders, you can do encoder-closed-loop 90°. Otherwise we pivot
@@ -188,7 +188,7 @@ void turnRight90(){
 
 /* ========================= Setup ========================= */
 void setup(){
-  Serial.begin(115200);
+  Serial.begin(9600);
 
   pinMode(R_RPWM, OUTPUT); pinMode(R_LPWM, OUTPUT);
   pinMode(L_RPWM, OUTPUT); pinMode(L_LPWM, OUTPUT);
