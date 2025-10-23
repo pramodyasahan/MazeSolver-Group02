@@ -1,6 +1,6 @@
 #include <Arduino.h>
 
-/* ========================= Pins ========================= */
+// ====================== Motor Pins ======================
 #define L_RPWM 4
 #define L_LPWM 5
 #define L_REN 6
@@ -11,296 +11,233 @@
 #define R_REN 9
 #define R_LEN 8
 
-// 8 digital reflectance sensors, 0 = far left ... 7 = far right
+// ====================== Line Sensors ======================
 const uint8_t sensorPins[8] = {22, 23, 24, 25, 26, 27, 28, 29};
+// After readSensors(): sensorVal[i] == 1 means "black", 0 means "white"
+uint8_t sensorVal[8];
+uint8_t sensorBits = 0; // bit i = 1 if sensor i sees black
 
-/* ============== (Optional) Encoders for crisp 90° ============== */
-// If you have them, uncomment these 6 lines and wire as in your wall-follower.
-// #define L_ENC_A 18
-// #define L_ENC_B 19
-// #define R_ENC_A 20
-// #define R_ENC_B 21
-// volatile long encoderCountL = 0, encoderCountR = 0;
-// void countEncoderL(){ int A=digitalRead(L_ENC_A), B=digitalRead(L_ENC_B); if (A==B) encoderCountL++; else encoderCountL--; }
-// void countEncoderR(){ int A=digitalRead(R_ENC_A), B=digitalRead(R_ENC_B); if (A==B) encoderCountR--; else encoderCountR++; }
+// Set this to false if your board reads LOW on black.
+const bool BLACK_IS_HIGH = true;
 
-/* ========================= PID ========================= */
-// Tune on your robot. Units are relative to sensor weighting below.
-float Kp = 10.0f;
-float Ki = 0.0f;
-float Kd = 4.0f;
+// Convenience groupings (0 = far-left, 7 = far-right)
+const uint8_t CENTER_IDX[2] = {3,4};
+const uint8_t LEFT_IDX[3]   = {0,1,2};
+const uint8_t RIGHT_IDX[3]  = {5,6,7};
 
-int   baseSpeed = 60;     // forward PWM at zero error
-int   maxPWM    = 100;    // clamp each wheel
-int   maxCorr   = 20;    // clamp |correction| contribution
-float emaAlpha  = 0.25f;  // smoothing on error (0..1). 0.25 = mild smoothing
+// How strong a “left/right feature” must be to treat as a corner
+const uint8_t LEFT_STRONG_MIN  = 2;
+const uint8_t RIGHT_STRONG_MIN = 2;
 
-// PID state
-float err = 0, errEMA = 0, lastPos = 0;
-float integ = 0;
+// Pivot behavior at corners
+const int TURN_PWM = 140;               // strong pivot power
+const uint16_t PIVOT_TIMEOUT_MS = 600;  // safety stop if something goes wrong
+const uint16_t BRAKE_MS = 30;
 
-/* ==================== Corner & Search ==================== */
-enum LFState { FOLLOW, HARD_LEFT, HARD_RIGHT, SEARCH };
-LFState state = FOLLOW;
+// ====================== PID Parameters ======================
+float Kp = 40.0;
+float Ki = 0.0;
+float Kd = 4.0;
 
-int   turnPWM        = 100; // in-place pivot PWM for hard corners/search
-int   reacquireCount = 3;   // require N consecutive "center seen" ticks to exit a turn
-int   lineLostSpinMs = 15;  // spin step while searching
-bool  lastWasLeft    = false; // for search direction
+int baseSpeed = 50;   // cruise speed
+int maxPWM    = 100;  // clamps for smoothness
 
-// If using encoders, you can do encoder-closed-loop 90°. Otherwise we pivot
-// until center sensors reacquire line.
-const bool USE_ENCODERS_FOR_90 = false; // set true if you enabled the encoder code above
+// ====================== Variables ======================
+float error = 0, lastError = 0;
+float integral = 0, derivative = 0, correction = 0;
 
-// Geometry for optional encoder-based 90° (fill if you want perfect angles)
-const float WHEEL_DIAMETER_CM = 6.5f;
-const float WHEEL_BASE_CM     = 17.0f;
-const int   countsPerRev      = 440; // your gear*channels*2
-const float WHEEL_CIRC_CM     = PI * WHEEL_DIAMETER_CM;
-const float TICKS_PER_DEG     = (((PI * WHEEL_BASE_CM) / WHEEL_CIRC_CM) * countsPerRev) / 360.0f;
-const long  TICKS_90          = (long)(90.0f * TICKS_PER_DEG);
+// ====================== Function Prototypes ======================
+void readSensors();
+float getLineError();               // returns ~[-3.5..+3.5]; uses lastError if no blacks
+void setMotorSpeeds(int leftSpeed, int rightSpeed);
+void stopMotors();
 
-/* ===================== Utilities ===================== */
-static inline int clamp(int v, int lo, int hi){ return (v<lo)?lo: (v>hi)?hi: v; }
+bool anyOnLine();
+bool centerOnLine();
+uint8_t countBlk(const uint8_t idxs[], uint8_t n);
+bool strongLeftFeature();
+bool strongRightFeature();
 
-void stopMotors(){
-  analogWrite(R_RPWM, 0); analogWrite(R_LPWM, 0);
-  analogWrite(L_RPWM, 0); analogWrite(L_LPWM, 0);
-}
+void brake(uint16_t ms);
+void pivotLeftUntilCenter();
+void pivotRightUntilCenter();
+void searchWhenLost();
 
-void setMotorSpeeds(int leftPWM, int rightPWM){
-  leftPWM  = clamp(leftPWM,  0, 255);
-  rightPWM = clamp(rightPWM, 0, 255);
-  // Right forward = R_RPWM
-  analogWrite(R_RPWM, rightPWM); analogWrite(R_LPWM, 0);
-  // Left forward  = L_LPWM
-  analogWrite(L_RPWM, 0);        analogWrite(L_LPWM, leftPWM);
-}
-
-/* Read sensors -> 8-bit mask, bit i = 1 if sensor i sees BLACK */
-uint8_t readSensorsMask(){
-  uint8_t mask = 0;
-  for(int i=0;i<8;i++){
-    int v = digitalRead(sensorPins[i]); // HIGH means black per your code
-    if (v == HIGH) mask |= (1 << i);
-  }
-  return mask;
-}
-
-/* Weighted position in [-3.5, +3.5], like your code (center around 0) */
-bool computePosition(float &posOut){
-  static const float W[8] = {-3.5, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5, 3.5};
-  uint8_t m = readSensorsMask();
-  float num = 0.0f, den = 0.0f;
-  for(int i=0;i<8;i++){
-    int on = (m >> i) & 1;
-    if (on){ num += W[i]; den += 1.0f; }
-  }
-  if (den <= 0.0f) return false;
-  posOut = num / den;
-  return true;
-}
-
-/* Pattern detectors (tuned for digital array)
-   - Center seen? => any of sensors 3 or 4 on.
-   - Hard Left: left cluster on, center off
-   - Hard Right: right cluster on, center off
-   - T / Cross: many sensors on across the array (we default to straight) */
-bool centerSeen(uint8_t m){ return (m & (1<<3)) || (m & (1<<4)); }
-int  popcount8(uint8_t m){ int c=0; for(;m;m&=(m-1)) c++; return c; }
-
-bool isHardLeft(uint8_t m){
-  // leftmost sensors active, center off, right mostly off
-  bool leftCluster  = ( (m & 0b00000111) != 0 );           // some of S0..S2
-  bool centerOff    = !centerSeen(m);
-  bool rightMostly0 = ( (m & 0b11100000) == 0 );          // S5..S7 off
-  return leftCluster && centerOff && rightMostly0;
-}
-
-bool isHardRight(uint8_t m){
-  bool rightCluster = ( (m & 0b11100000) != 0 );          // some of S5..S7
-  bool centerOff    = !centerSeen(m);
-  bool leftMostly0  = ( (m & 0b00000111) == 0 );          // S0..S2 off
-  return rightCluster && centerOff && leftMostly0;
-}
-
-bool isJunction(uint8_t m){
-  // many sensors black => likely cross/T. Keep going straight by PID (or choose policy).
-  return popcount8(m) >= 5;
-}
-
-/* ================== Corner turning primitives ================== */
-void pivotLeftTimed(){  // used if not using encoders
-  analogWrite(R_RPWM, turnPWM); analogWrite(R_LPWM, 0);   // right fwd
-  analogWrite(L_RPWM, turnPWM); analogWrite(L_LPWM, 0);   // left back
-}
-void pivotRightTimed(){
-  analogWrite(L_RPWM, 0);        analogWrite(L_LPWM, turnPWM); // left fwd
-  analogWrite(R_RPWM, 0);        analogWrite(R_LPWM, turnPWM); // right back
-}
-
-// If you enabled encoders above, you can do a precise 90° then small settle.
-// Otherwise we pivot until center sensors reacquire the line.
-void turnLeft90(){
-  if (USE_ENCODERS_FOR_90){
-    // noInterrupts(); encoderCountL=encoderCountR=0; interrupts();
-    // while ( (abs(encoderCountL)+abs(encoderCountR))/2 < TICKS_90 ){
-    //   pivotLeftTimed();
-    //   delay(6);
-    // }
-    // stopMotors(); delay(60);
-    // return;
-  }
-  // Timed/condition-based: spin until center seen (with debounce)
-  int okCount = 0;
-  uint32_t watchdog = millis() + 1500; // safety timeout
-  while (millis() < watchdog){
-    pivotLeftTimed();
-    uint8_t m = readSensorsMask();
-    if (centerSeen(m)) { if (++okCount >= reacquireCount) break; }
-    else okCount = 0;
-    delay(5);
-  }
-  stopMotors(); delay(60);
-}
-
-void turnRight90(){
-  if (USE_ENCODERS_FOR_90){
-    // noInterrupts(); encoderCountL=encoderCountR=0; interrupts();
-    // while ( (abs(encoderCountL)+abs(encoderCountR))/2 < TICKS_90 ){
-    //   pivotRightTimed();
-    //   delay(6);
-    // }
-    // stopMotors(); delay(60);
-    // return;
-  }
-  int okCount = 0;
-  uint32_t watchdog = millis() + 1500;
-  while (millis() < watchdog){
-    pivotRightTimed();
-    uint8_t m = readSensorsMask();
-    if (centerSeen(m)) { if (++okCount >= reacquireCount) break; }
-    else okCount = 0;
-    delay(5);
-  }
-  stopMotors(); delay(60);
-}
-
-/* ========================= Setup ========================= */
-void setup(){
+// ====================== Setup ======================
+void setup() {
   Serial.begin(9600);
 
-  pinMode(R_RPWM, OUTPUT); pinMode(R_LPWM, OUTPUT);
-  pinMode(L_RPWM, OUTPUT); pinMode(L_LPWM, OUTPUT);
-  pinMode(R_REN, OUTPUT);  pinMode(R_LEN, OUTPUT);
-  pinMode(L_REN, OUTPUT);  pinMode(L_LEN, OUTPUT);
-  digitalWrite(R_REN, HIGH); digitalWrite(R_LEN, HIGH);
-  digitalWrite(L_REN, HIGH); digitalWrite(L_LEN, HIGH);
+  // --- Motor setup ---
+  pinMode(R_RPWM, OUTPUT);
+  pinMode(R_LPWM, OUTPUT);
+  pinMode(L_RPWM, OUTPUT);
+  pinMode(L_LPWM, OUTPUT);
 
-  for (int i=0;i<8;i++) pinMode(sensorPins[i], INPUT);
+  pinMode(R_REN, OUTPUT);
+  pinMode(R_LEN, OUTPUT);
+  pinMode(L_REN, OUTPUT);
+  pinMode(L_LEN, OUTPUT);
 
-  // If you enabled encoders:
-  // pinMode(L_ENC_A, INPUT_PULLUP); pinMode(L_ENC_B, INPUT_PULLUP);
-  // pinMode(R_ENC_A, INPUT_PULLUP); pinMode(R_ENC_B, INPUT_PULLUP);
-  // attachInterrupt(digitalPinToInterrupt(L_ENC_A), countEncoderL, CHANGE);
-  // attachInterrupt(digitalPinToInterrupt(R_ENC_A), countEncoderR, CHANGE);
+  digitalWrite(R_REN, HIGH);
+  digitalWrite(R_LEN, HIGH);
+  digitalWrite(L_REN, HIGH);
+  digitalWrite(L_LEN, HIGH);
 
-  stopMotors();
-  Serial.println("Line follower: PID + hard-corner handling ready.");
+  // --- Sensor setup ---
+  for (int i = 0; i < 8; i++) pinMode(sensorPins[i], INPUT);
+
+  Serial.println("PID Line Following Robot (with hard 90° corner handling)");
 }
 
-/* ========================= Loop ========================= */
-void loop(){
-  uint8_t m = readSensorsMask();
+// ====================== Main Loop ======================
+void loop() {
+  readSensors();
 
-  /* ----- Lost line? go SEARCH ----- */
-  if (m == 0){
-    state = SEARCH;
+  // 1) If we see a strong corner on one side and center is not on line, snap pivot
+  if (strongLeftFeature() && !centerOnLine()) {
+    brake(BRAKE_MS);
+    pivotLeftUntilCenter();
+    brake(BRAKE_MS);
+  } else if (strongRightFeature() && !centerOnLine()) {
+    brake(BRAKE_MS);
+    pivotRightUntilCenter();
+    brake(BRAKE_MS);
   } else {
-    // Decide state if not searching
-    if (isJunction(m)){
-      // Simple policy: treat as straight; PID will keep you centered.
-      state = FOLLOW;
-    } else if (isHardLeft(m)){
-      state = HARD_LEFT;
-      lastWasLeft = true;
-    } else if (isHardRight(m)){
-      state = HARD_RIGHT;
-      lastWasLeft = false;
-    } else {
-      state = FOLLOW;
+    // 2) Normal PID tracking (with smooth recovery when line is momentarily lost)
+    if (!anyOnLine()) {
+      searchWhenLost();
+      return;
     }
+
+    error = getLineError();
+    integral += error;
+    derivative = error - lastError;
+    correction = (Kp * error) + (Ki * integral) + (Kd * derivative);
+    lastError = error;
+
+    int leftSpeed  = constrain((int)(baseSpeed + correction),  0, maxPWM);
+    int rightSpeed = constrain((int)(baseSpeed - correction),  0, maxPWM);
+
+    setMotorSpeeds(leftSpeed, rightSpeed);
   }
 
-  switch (state){
-    case FOLLOW: {
-      // Compute position and run PID
-      float pos;
-      if (!computePosition(pos)){
-        // defensive: nothing seen, drop to search
-        state = SEARCH;
-        break;
-      }
-
-      // Derivative on measurement (smoother than on error for noisy sensors)
-      float posEMA = errEMA*(1.0f-emaAlpha) + pos*emaAlpha;
-      float dpos   = posEMA - lastPos;
-      lastPos = posEMA;
-
-      // PID
-      err = -posEMA; // error = desired(0) - pos
-      errEMA = errEMA*(1.0f-emaAlpha) + err*emaAlpha;
-
-      // integral anti-windup
-      integ += errEMA;
-      integ  = clamp(integ, -1000, 1000);
-
-      float u  = Kp*errEMA + Ki*integ - Kd*dpos;  // note the '-' with dpos (derivative on measurement)
-      int   du = (int)clamp((int)u, -maxCorr, maxCorr);
-
-      int left  = clamp(baseSpeed + du, 0, maxPWM);
-      int right = clamp(baseSpeed - du, 0, maxPWM);
-
-      setMotorSpeeds(left, right);
-      break;
-    }
-
-    case HARD_LEFT: {
-      // Commit to a left pivot until center sensors reacquire
-      turnLeft90();
-      state = FOLLOW;
-      // small roll-in helps stabilize
-      setMotorSpeeds(baseSpeed, baseSpeed);
-      delay(60);
-      break;
-    }
-
-    case HARD_RIGHT: {
-      turnRight90();
-      state = FOLLOW;
-      setMotorSpeeds(baseSpeed, baseSpeed);
-      delay(60);
-      break;
-    }
-
-    case SEARCH: {
-      // spin toward last known side of line
-      if (lastWasLeft){
-        pivotLeftTimed();
-      } else {
-        pivotRightTimed();
-      }
-      delay(lineLostSpinMs);
-      // stop briefly and check again
-      stopMotors();
-      delay(5);
-      // if center seen, immediately resume FOLLOW
-      uint8_t mm = readSensorsMask();
-      if (centerSeen(mm)) state = FOLLOW;
-      break;
-    }
-  }
-
-  // Optional: slow main loop a touch (digital sensors are fast)
+  // Small loop delay for stability
   delay(5);
+}
+
+// ===============================================================
+//                  Function Definitions
+// ===============================================================
+
+void readSensors() {
+  sensorBits = 0;
+  for (int i = 0; i < 8; i++) {
+    int raw = digitalRead(sensorPins[i]);
+    bool isBlack = BLACK_IS_HIGH ? (raw == HIGH) : (raw == LOW);
+    sensorVal[i] = isBlack ? 1 : 0;
+    if (isBlack) sensorBits |= (1u << i);
+  }
+}
+
+// Weighted error: outer sensors have larger magnitude so turns are detected earlier
+float getLineError() {
+  static const float weight[8] = {-3.5, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5, 3.5};
+  float sumW = 0.0f, sum = 0.0f;
+
+  for (int i = 0; i < 8; i++) {
+    if (sensorVal[i]) { sumW += weight[i]; sum += 1.0f; }
+  }
+
+  if (sum == 0.0f) {
+    // No line currently under any sensor → keep prior heading
+    return lastError;
+  }
+
+  return sumW / sum; // normalized error roughly in [-3.5, +3.5]
+}
+
+void setMotorSpeeds(int leftSpeed, int rightSpeed) {
+  // Your original wiring: Right forward uses R_RPWM, Left forward uses L_LPWM
+  analogWrite(R_RPWM, rightSpeed);
+  analogWrite(R_LPWM, 0);
+  analogWrite(L_RPWM, 0);
+  analogWrite(L_LPWM, leftSpeed);
+}
+
+void stopMotors() {
+  analogWrite(R_RPWM, 0);
+  analogWrite(R_LPWM, 0);
+  analogWrite(L_RPWM, 0);
+  analogWrite(L_LPWM, 0);
+}
+
+// ====================== Corner / Recovery helpers ======================
+bool anyOnLine() { return sensorBits != 0; }
+bool centerOnLine() { return sensorVal[CENTER_IDX[0]] || sensorVal[CENTER_IDX[1]]; }
+
+uint8_t countBlk(const uint8_t idxs[], uint8_t n) {
+  uint8_t c = 0;
+  for (uint8_t k = 0; k < n; k++) c += sensorVal[idxs[k]] ? 1 : 0;
+  return c;
+}
+
+// “Strong” side feature = ≥2 blacks on that edge while the opposite edge is mostly white.
+// This triggers a decisive pivot rather than letting PID average the corner away.
+bool strongLeftFeature() {
+  uint8_t L = countBlk(LEFT_IDX, 3);
+  uint8_t R = countBlk(RIGHT_IDX, 3);
+  return (L >= LEFT_STRONG_MIN) && (R <= 1);
+}
+bool strongRightFeature() {
+  uint8_t L = countBlk(LEFT_IDX, 3);
+  uint8_t R = countBlk(RIGHT_IDX, 3);
+  return (R >= RIGHT_STRONG_MIN) && (L <= 1);
+}
+
+void brake(uint16_t ms) { stopMotors(); delay(ms); }
+
+// In-place left pivot until a center sensor re-locks the line (or timeout)
+void pivotLeftUntilCenter() {
+  unsigned long t0 = millis();
+  while (millis() - t0 < PIVOT_TIMEOUT_MS) {
+    // Right forward, Left backward
+    analogWrite(R_RPWM, TURN_PWM); analogWrite(R_LPWM, 0);
+    analogWrite(L_RPWM, TURN_PWM); analogWrite(L_LPWM, 0);
+    readSensors();
+    if (centerOnLine()) break;
+    delay(4);
+  }
+}
+
+// In-place right pivot until center sensors see the line
+void pivotRightUntilCenter() {
+  unsigned long t0 = millis();
+  while (millis() - t0 < PIVOT_TIMEOUT_MS) {
+    // Right backward, Left forward
+    analogWrite(R_RPWM, 0);        analogWrite(R_LPWM, TURN_PWM);
+    analogWrite(L_RPWM, 0);        analogWrite(L_LPWM, TURN_PWM);
+    readSensors();
+    if (centerOnLine()) break;
+    delay(4);
+  }
+}
+
+// When no sensors see the line, rotate toward the last error direction to re-acquire quickly
+void searchWhenLost() {
+  if (lastError >= 0) {
+    // rotate right gently
+    analogWrite(R_RPWM, 0);        analogWrite(R_LPWM, baseSpeed);
+    analogWrite(L_RPWM, 0);        analogWrite(L_LPWM, baseSpeed);
+  } else {
+    // rotate left gently
+    analogWrite(R_RPWM, baseSpeed); analogWrite(R_LPWM, 0);
+    analogWrite(L_RPWM, baseSpeed); analogWrite(L_LPWM, 0);
+  }
+  // brief search window, rechecking sensors
+  unsigned long t0 = millis();
+  while (millis() - t0 < 150) {
+    readSensors();
+    if (anyOnLine()) break;
+    delay(4);
+  }
 }
