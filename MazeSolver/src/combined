@@ -1,90 +1,32 @@
 #include <Arduino.h>
 
-// ==================== Pin Definitions ====================
-// --- Wall Following Sensors ---
-#define TRIG_FRONT 48
-#define ECHO_FRONT 49
-#define TRIG_RIGHT 50
-#define ECHO_RIGHT 51
-#define TRIG_LEFT  52
-#define ECHO_LEFT  53
+// ===============================================================
+//                       Mode Switching Logic
+// ===============================================================
 
-// --- Motor Driver Pins ---
-#define L_RPWM 4
-#define L_LPWM 5
-#define L_REN  6
-#define L_LEN  7
-
-#define R_RPWM 2
-#define R_LPWM 3
-#define R_REN  9
-#define R_LEN  8
-
-// --- Line Following Sensors ---
-const uint8_t sensorPins[8] = {22, 23, 24, 25, 26, 27, 28, 29};
-
-// --- Encoders (Optional) ---
-#define L_ENC_A 18
-#define L_ENC_B 19
-#define R_ENC_A 20
-#define R_ENC_B 21
-
-// ==================== Robot State ====================
-enum RobotState {
+// Enum to define the robot's primary operational modes
+enum RobotMode {
   WALL_FOLLOWING,
-  TRANSITION_FORWARD,
   LINE_FOLLOWING
 };
-RobotState currentState = WALL_FOLLOWING;
 
-unsigned long transitionStartTime = 0;
-const unsigned long transitionDuration = 90000; // 1.5 minutes in milliseconds
+// Global variable to hold the current mode, starts in line-following
+RobotMode currentMode = LINE_FOLLOWING; 
 
-// ==================== Wall Following Constants ====================
-const int OBSTACLE_THRESHOLD      = 12;
-const int OPEN_SPACE_THRESHOLD_CM = 50;
-const int DEAD_END_THRESHOLD      = 12;
-const int NO_WALL_THRESHOLD       = 30;
-const int CORNER_CLEARANCE_CM     = 5;
-const int BASE_PWM_STRAIGHT       = 60;
-const float Kp_wall               = 1.5f;
-const int   MAX_CORRECTION_WALL   = 20;
-const int   WALL_DETECT_RANGE     = 25;
-const int   ALIGN_PWM             = 45;
-const int   ALIGN_DURATION_MS     = 50;
-const int   ALIGN_TOLERANCE_CM    = 1;
-const int   TURN_PWM_WALL         = 50;
-const float TURN_RADIUS_CM        = 10.0f;
-const int   PIVOT_180_PWM         = 55;
 
-// ==================== Line Following Constants ====================
-float Kp_line = 20.0f;
-float Ki_line = 0.0f;
-float Kd_line = 4.0f;
-int   baseSpeed_line = 60;
-int   maxPWM_line    = 100;
-int   maxCorr_line   = 40;
-float emaAlpha  = 0.25f;
-float err = 0, errEMA = 0, lastPos = 0;
-float integ = 0;
-enum LFState { FOLLOW, HARD_LEFT, HARD_RIGHT, SEARCH };
-LFState lineFollowState = FOLLOW;
-int   turnPWM_line        = 120;
-int   reacquireCount = 3;
-int   lineLostSpinMs = 20;
-bool  lastWasLeft    = false;
+// ===============================================================
+//                  Declarations from Both Programs
+// ===============================================================
 
-// ==================== Physical & Encoder Constants ====================
-const float WHEEL_DIAMETER_CM = 6.5f;
-const float WHEEL_BASE_CM     = 17.0f;
-const int pulsesPerMotorRev = 11;
-const int gearRatio         = 20;
-const int countsPerRev      = pulsesPerMotorRev * gearRatio * 2;
+// --- Mode Switching Declarations (FIX) ---
+void checkAndSetMode();
+bool isHardLeft(uint8_t m);
+bool isHardRight(uint8_t m);
+uint8_t readSensorsMask(); 
+void executeWallFollowing();
+void executeLineFollowing();
 
-volatile long encoderCountL = 0;
-volatile long encoderCountR = 0;
-
-// ==================== Function Prototypes ====================
+// --- Wall Follower Declarations ---
 void stopMotors();
 long readUltrasonic(int trigPin, int echoPin);
 void countEncoderL();
@@ -97,85 +39,189 @@ void pivotLeft(int pwmVal);
 void pivotRight(int pwmVal);
 void pivot180(int pwmVal);
 void moveForwardDistance(int distance_cm, int pwmVal);
-void wallFollowingRoutine();
-void lineFollowingRoutine();
-void transitionRoutine();
-uint8_t readLineSensors();
+
+// --- Line Follower Declarations ---
 void setMotorSpeeds(int leftPWM, int rightPWM);
+bool computePosition(float &posOut);
 void turnLeft90();
 void turnRight90();
 
 
+// ===============================================================
+//                       Pin Definitions
+// ===============================================================
+
+// --- Wall Follower Pins (Ultrasonic) ---
+#define TRIG_FRONT 48
+#define ECHO_FRONT 49
+#define TRIG_RIGHT 50
+#define ECHO_RIGHT 51
+#define TRIG_LEFT  52
+#define ECHO_LEFT  53
+
+// --- Motor Driver Pins (Shared) ---
+#define L_RPWM 4
+#define L_LPWM 5
+#define L_REN  6
+#define L_LEN  7
+
+#define R_RPWM 2
+#define R_LPWM 3
+#define R_REN  9
+#define R_LEN  8
+
+// --- Encoder Pins (From Wall Follower) ---
+#define L_ENC_A 18
+#define L_ENC_B 19
+#define R_ENC_A 20
+#define R_ENC_B 21
+
+// --- Line Follower Pins (Reflectance Array) ---
+const uint8_t sensorPins[8] = {22, 23, 24, 25, 26, 27, 28, 29};
+
+
+// ===============================================================
+//                      Constants & Globals
+// ===============================================================
+
+// --- Wall Follower Constants ---
+const float WHEEL_DIAMETER_CM = 6.5f;
+const float WHEEL_BASE_CM     = 17.0f;
+const int pulsesPerMotorRev = 11;
+const int gearRatio         = 20;
+const int countsPerRev      = pulsesPerMotorRev * gearRatio * 2;
+const int   TURN_PWM       = 50;
+const float TURN_RADIUS_CM = 10.0f;
+const int   PIVOT_180_PWM  = 55;
+const int OBSTACLE_THRESHOLD      = 12;
+const int OPEN_SPACE_THRESHOLD_CM = 50;
+const int DEAD_END_THRESHOLD      = 12;
+const int NO_WALL_THRESHOLD       = 30;
+const int CORNER_CLEARANCE_CM     = 5;
+const int   BASE_PWM_STRAIGHT = 60;
+const float Kp_wall           = 1.5f; // Renamed to avoid conflict
+const int   MAX_CORRECTION    = 20;
+const int   WALL_DETECT_RANGE = 25;
+const int ALIGN_PWM         = 45;
+const int ALIGN_DURATION_MS = 50;
+const int ALIGN_TOLERANCE_CM= 1;
+volatile long encoderCountL = 0;
+volatile long encoderCountR = 0;
+
+// --- Line Follower Constants ---
+float Kp_line = 10.0f; // Renamed
+float Ki = 0.0f;
+float Kd_line = 4.0f; // Renamed
+int   baseSpeed = 60;
+int   maxPWM    = 100;
+int   maxCorr   = 20;
+float emaAlpha  = 0.25f;
+float err = 0, errEMA = 0, lastPos = 0;
+float integ = 0;
+enum LFState { FOLLOW, HARD_LEFT, HARD_RIGHT, SEARCH };
+LFState lineFollowState = FOLLOW;
+int   turnPWM_line   = 100; // Renamed
+int   reacquireCount = 3;
+int   lineLostSpinMs = 15;
+bool  lastWasLeft    = false;
+
+// Helpers
+inline void stopRight(){ analogWrite(R_RPWM, 0); analogWrite(R_LPWM, 0); }
+inline void stopLeft() { analogWrite(L_RPWM, 0); analogWrite(L_LPWM, 0); }
+inline long absl(long x){ return (x < 0) ? -x : x; }
+static inline int clamp(int v, int lo, int hi){ return (v<lo)?lo: (v>hi)?hi: v; }
+
+
+// ===============================================================
+//                          SETUP
+// ===============================================================
 void setup() {
   Serial.begin(9600);
 
-  // --- Pin Modes ---
+  // --- Pin Initializations ---
+  // Ultrasonic
   pinMode(TRIG_FRONT, OUTPUT); pinMode(ECHO_FRONT, INPUT);
   pinMode(TRIG_LEFT,  OUTPUT); pinMode(ECHO_LEFT,  INPUT);
   pinMode(TRIG_RIGHT, OUTPUT); pinMode(ECHO_RIGHT, INPUT);
 
+  // Motors
   pinMode(R_RPWM, OUTPUT); pinMode(R_LPWM, OUTPUT);
   pinMode(L_RPWM, OUTPUT); pinMode(L_LPWM, OUTPUT);
   pinMode(R_REN, OUTPUT);  pinMode(R_LEN, OUTPUT);
   pinMode(L_REN, OUTPUT);  pinMode(L_LEN, OUTPUT);
-
-  for (int i=0; i<8; i++) {
-    pinMode(sensorPins[i], INPUT);
-  }
-
-  pinMode(L_ENC_A, INPUT_PULLUP); pinMode(L_ENC_B, INPUT_PULLUP);
-  pinMode(R_ENC_A, INPUT_PULLUP); pinMode(R_ENC_B, INPUT_PULLUP);
-
-  // --- Enable Motor Drivers ---
   digitalWrite(R_REN, HIGH); digitalWrite(R_LEN, HIGH);
   digitalWrite(L_REN, HIGH); digitalWrite(L_LEN, HIGH);
 
-  // --- Attach Interrupts ---
+  // Encoders
+  pinMode(L_ENC_A, INPUT_PULLUP); pinMode(L_ENC_B, INPUT_PULLUP);
+  pinMode(R_ENC_A, INPUT_PULLUP); pinMode(R_ENC_B, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(L_ENC_A), countEncoderL, CHANGE);
   attachInterrupt(digitalPinToInterrupt(R_ENC_A), countEncoderR, CHANGE);
 
+  // Reflectance Sensor Array
+  for (int i=0; i<8; i++) pinMode(sensorPins[i], INPUT);
+
   stopMotors();
-  Serial.println("Robot Initialized. Starting with Wall Following.");
+  Serial.println("Robot Initialized. Starting in Line Following Mode.");
 }
 
+// ===============================================================
+//                          MAIN LOOP
+// ===============================================================
 void loop() {
-  switch (currentState) {
+  // Step 1: Check the ground surface to determine the mode
+  checkAndSetMode();
+
+  // Step 2: Execute the logic for the current mode
+  switch (currentMode) {
     case WALL_FOLLOWING:
-      wallFollowingRoutine();
-      {
-        uint8_t white_count = 0;
-        uint8_t sensor_values = readLineSensors();
-        // A HIGH reading from your sensor code means BLACK.
-        // We need to check for WHITE, which is a LOW reading.
-        for (int i = 0; i < 8; i++) {
-          if (!((sensor_values >> i) & 1)) { // Check if the bit is 0 (LOW/WHITE)
-            white_count++;
-          }
-        }
-        if (white_count >= 4) {
-          Serial.println("White surface detected. Transitioning...");
-          currentState = TRANSITION_FORWARD;
-          transitionStartTime = millis();
-        }
-      }
+      executeWallFollowing();
       break;
-
-    case TRANSITION_FORWARD:
-      transitionRoutine();
-      break;
-
     case LINE_FOLLOWING:
-      lineFollowingRoutine();
+      executeLineFollowing();
       break;
   }
-  delay(10);
+  
+  delay(10); // Small delay for stability
 }
 
 // ===============================================================
-//                       STATE ROUTINES
+//          MODE DETECTION & EXECUTION LOGIC
 // ===============================================================
 
-void wallFollowingRoutine() {
+/*
+ * Reads the reflectance sensor array to decide the operational mode.
+ * - If all sensors see black, switch to WALL_FOLLOWING.
+ * - Otherwise, assume a line course and switch to LINE_FOLLOWING.
+ */
+void checkAndSetMode() {
+  uint8_t sensorMask = readSensorsMask();
+
+  // If all 8 sensors are on a black surface, switch to wall following
+  if (sensorMask == 0b11111111) {
+    if (currentMode != WALL_FOLLOWING) {
+      Serial.println(">> ALL BLACK DETECTED: Switching to WALL FOLLOWING mode.");
+      currentMode = WALL_FOLLOWING;
+      stopMotors(); // Stop motors briefly during transition
+      delay(200);
+    }
+  } 
+  // Otherwise, we are on a course with a line (or all white)
+  else {
+    if (currentMode != LINE_FOLLOWING) {
+      Serial.println(">> LINE/WHITE DETECTED: Switching to LINE FOLLOWING mode.");
+      currentMode = LINE_FOLLOWING;
+      stopMotors(); // Stop motors briefly during transition
+      delay(200);
+    }
+  }
+}
+
+/**
+ * This function contains the original loop() content from the
+ * WALL-FOLLOWING program.
+ */
+void executeWallFollowing() {
   long dFront = readUltrasonic(TRIG_FRONT, ECHO_FRONT);
   long dLeft  = readUltrasonic(TRIG_LEFT,  ECHO_LEFT);
   long dRight = readUltrasonic(TRIG_RIGHT, ECHO_RIGHT);
@@ -184,46 +230,47 @@ void wallFollowingRoutine() {
   bool leftValid  = dLeft  > 0;
   bool rightValid = dRight > 0;
 
+  Serial.print("WALL MODE | F:"); Serial.print(dFront);
+  Serial.print(" L:"); Serial.print(dLeft);
+  Serial.print(" R:"); Serial.println(dRight);
+
+  // STATE 1: Dead End
   if (frontValid && dFront < DEAD_END_THRESHOLD &&
       leftValid  && dLeft  < DEAD_END_THRESHOLD &&
       rightValid && dRight < DEAD_END_THRESHOLD) {
       Serial.println("--- DEAD END: Executing 180 turn ---");
-      stopMotors();
-      delay(200);
+      stopMotors(); delay(200);
       pivot180(PIVOT_180_PWM);
-      stopMotors();
-      delay(200);
+      stopMotors(); delay(200);
   }
+  // STATE 2: Obstacle ahead
   else if (frontValid && dFront < OBSTACLE_THRESHOLD) {
-    stopMotors();
-    delay(150);
+    stopMotors(); delay(150);
     bool turnLeft = (dLeft > dRight);
     if (turnLeft) smoothTurnLeft();
     else          smoothTurnRight();
-    stopMotors();
-    delay(150);
+    stopMotors(); delay(150);
   }
+  // STATE 3: No wall on the left, turn left
   else if (leftValid && dLeft > NO_WALL_THRESHOLD) {
     Serial.println("--- No left wall. Clearing corner... ---");
     moveForwardDistance(CORNER_CLEARANCE_CM, BASE_PWM_STRAIGHT);
     Serial.println("--- Corner cleared. Initiating left turn. ---");
-    stopMotors();
-    delay(10);
+    stopMotors(); delay(10);
     smoothTurnLeft();
-    stopMotors();
-    delay(150);
+    stopMotors(); delay(150);
   }
+  // STATE 4: Path clear (wall following)
   else {
     int leftSpeed, rightSpeed;
-    if (leftValid && dLeft < WALL_DETECT_RANGE) {
-      int targetDist = 8; // Maintain 8cm from left wall
+    if (leftValid && dLeft < 10) {
+      int targetDist = 6;
       int error = (int)(dLeft - targetDist);
       int correction = (int)(Kp_wall * error);
-      correction = constrain(correction, -MAX_CORRECTION_WALL, MAX_CORRECTION_WALL);
+      correction = constrain(correction, -MAX_CORRECTION, MAX_CORRECTION);
       leftSpeed  = constrain(BASE_PWM_STRAIGHT + correction, 0, 100);
       rightSpeed = constrain(BASE_PWM_STRAIGHT - correction, 0, 100);
-    }
-    else {
+    } else {
       leftSpeed = BASE_PWM_STRAIGHT;
       rightSpeed = BASE_PWM_STRAIGHT;
     }
@@ -231,40 +278,21 @@ void wallFollowingRoutine() {
   }
 }
 
-void transitionRoutine() {
-  moveForward(BASE_PWM_STRAIGHT, BASE_PWM_STRAIGHT);
-  if (millis() - transitionStartTime >= transitionDuration) {
-    Serial.println("Transition complete. Switching to Line Following.");
-    currentState = LINE_FOLLOWING;
-    stopMotors();
-    delay(500);
-  }
-}
+/**
+ * This function contains the original loop() content from the
+ * LINE-FOLLOWING program.
+ */
+void executeLineFollowing() {
+  uint8_t m = readSensorsMask();
+  Serial.print("LINE MODE | Mask: "); Serial.println(m, BIN);
 
-void lineFollowingRoutine() {
-  uint8_t m = readLineSensors();
-
-  if (m == 0){ // All sensors see white (or are off the line)
+  if (m == 0){
     lineFollowState = SEARCH;
   } else {
-    // Check for a junction (many sensors on)
-    int popcount = 0;
-    for (int i = 0; i < 8; i++) {
-      if ((m >> i) & 1) popcount++;
-    }
-    bool isJunction = (popcount >= 5);
-
-    // Check for specific turn patterns
-    bool centerSeen = (m & (1<<3)) || (m & (1<<4));
-    bool isHardLeft = ((m & 0b00000111) != 0) && !centerSeen && ((m & 0b11100000) == 0);
-    bool isHardRight = ((m & 0b11100000) != 0) && !centerSeen && ((m & 0b00000111) == 0);
-
-    if (isJunction){
-      lineFollowState = FOLLOW; // For now, treat junctions as a straight line
-    } else if (isHardLeft){
+    if (isHardLeft(m)) {
       lineFollowState = HARD_LEFT;
       lastWasLeft = true;
-    } else if (isHardRight){
+    } else if (isHardRight(m)) {
       lineFollowState = HARD_RIGHT;
       lastWasLeft = false;
     } else {
@@ -272,69 +300,48 @@ void lineFollowingRoutine() {
     }
   }
 
-  // Execute action based on state
   switch (lineFollowState){
     case FOLLOW: {
       float pos;
-      static const float W[8] = {-3.5, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5, 3.5};
-      float num = 0.0f, den = 0.0f;
-      for(int i=0;i<8;i++){
-        if ((m >> i) & 1){ num += W[i]; den += 1.0f; }
-      }
-
-      if (den <= 0.0f) { // Should not happen if m != 0, but as a safeguard
+      if (!computePosition(pos)){
         lineFollowState = SEARCH;
         break;
       }
-      pos = num / den;
-
-      // ======================= PID CALCULATION (FIXED) =======================
-      // Correctly smooth the position reading based on the LAST position, not the last error.
-      float posEMA = lastPos * (1.0f - emaAlpha) + pos * emaAlpha;
+      float posEMA = errEMA*(1.0f-emaAlpha) + pos*emaAlpha;
       float dpos   = posEMA - lastPos;
-      lastPos = posEMA; // Update lastPos for the next iteration
-
-      // Calculate error based on the smoothed position
-      err = 0 - posEMA;
-      errEMA = errEMA * (1.0f - emaAlpha) + err * emaAlpha;
-
-      // Update integral term
+      lastPos = posEMA;
+      err = -posEMA;
+      errEMA = errEMA*(1.0f-emaAlpha) + err*emaAlpha;
       integ += errEMA;
-      // ========================= END OF FIX ===========================
-
-      integ  = constrain(integ, -1000, 1000); // Anti-windup
-      float u  = Kp_line*errEMA + Ki_line*integ - Kd_line*dpos;
-      int   du = (int)constrain((int)u, -maxCorr_line, maxCorr_line);
-      int left  = constrain(baseSpeed_line + du, 0, maxPWM_line);
-      int right = constrain(baseSpeed_line - du, 0, maxPWM_line);
+      integ  = clamp(integ, -1000, 1000);
+      float u  = Kp_line*errEMA + Ki*integ - Kd_line*dpos;
+      int   du = (int)clamp((int)u, -maxCorr, maxCorr);
+      int left  = clamp(baseSpeed + du, 0, maxPWM);
+      int right = clamp(baseSpeed - du, 0, maxPWM);
       setMotorSpeeds(left, right);
       break;
     }
     case HARD_LEFT: {
       turnLeft90();
       lineFollowState = FOLLOW;
-      setMotorSpeeds(baseSpeed_line, baseSpeed_line);
+      setMotorSpeeds(baseSpeed, baseSpeed);
       delay(60);
       break;
     }
     case HARD_RIGHT: {
       turnRight90();
       lineFollowState = FOLLOW;
-      setMotorSpeeds(baseSpeed_line, baseSpeed_line);
+      setMotorSpeeds(baseSpeed, baseSpeed);
       delay(60);
       break;
     }
     case SEARCH: {
-      if (lastWasLeft){
-        pivotLeft(turnPWM_line);
-      } else {
-        pivotRight(turnPWM_line);
-      }
+      if (lastWasLeft) pivotLeft(turnPWM_line);
+      else pivotRight(turnPWM_line);
       delay(lineLostSpinMs);
       stopMotors();
       delay(5);
-      // Check if line is reacquired
-      uint8_t mm = readLineSensors();
+      uint8_t mm = readSensorsMask();
       if ((mm & (1<<3)) || (mm & (1<<4))) lineFollowState = FOLLOW;
       break;
     }
@@ -343,33 +350,78 @@ void lineFollowingRoutine() {
 
 
 // ===============================================================
-//             HELPER & UTILITY FUNCTIONS
+//             FUNCTIONS from WALL FOLLOWER
 // ===============================================================
 
-uint8_t readLineSensors(){
-  uint8_t mask = 0;
-  for(int i=0;i<8;i++){
-    if (digitalRead(sensorPins[i]) == HIGH) { // HIGH means black per your code
-      mask |= (1 << i);
-    }
+void moveForwardDistance(int distance_cm, int pwmVal) {
+  const float wheelCircumference = PI * WHEEL_DIAMETER_CM;
+  const long targetCounts = (long)(((float)distance_cm / wheelCircumference) * countsPerRev);
+  noInterrupts();
+  encoderCountL = 0;
+  encoderCountR = 0;
+  interrupts();
+  moveForward(pwmVal, pwmVal);
+  while (true) {
+    noInterrupts();
+    long currentL = encoderCountL;
+    long currentR = encoderCountR;
+    interrupts();
+    if ((absl(currentL) + absl(currentR)) / 2 >= targetCounts) break;
+    delay(10);
   }
-  return mask;
+  stopMotors();
 }
 
-void stopMotors() {
-  analogWrite(R_RPWM, 0); analogWrite(R_LPWM, 0);
-  analogWrite(L_RPWM, 0); analogWrite(L_LPWM, 0);
+void pivot180(int pwmVal) {
+  const float wheelCircumference = PI * WHEEL_DIAMETER_CM;
+  const float turnDistance = PI * (WHEEL_BASE_CM / 2.0f);
+  const long targetCounts = (long)((turnDistance / wheelCircumference) * countsPerRev);
+  encoderCountL = 0;
+  encoderCountR = 0;
+  pivotRight(pwmVal);
+  while(absl(encoderCountL) < targetCounts || absl(encoderCountR) < targetCounts) {
+    if (absl(encoderCountL) >= targetCounts) stopLeft();
+    if (absl(encoderCountR) >= targetCounts) stopRight();
+    delay(5);
+  }
+  stopMotors();
 }
 
-void setMotorSpeeds(int leftPWM, int rightPWM){
-  leftPWM  = constrain(leftPWM,  0, 255);
-  rightPWM = constrain(rightPWM, 0, 255);
-  // Right forward = R_RPWM
-  analogWrite(R_RPWM, rightPWM); analogWrite(R_LPWM, 0);
-  // Left forward  = L_LPWM
-  analogWrite(L_RPWM, 0);        analogWrite(L_LPWM, leftPWM);
+static void smoothTurnArc90(bool leftTurn, float Rc_cm, int pwmOuterMax) {
+  const float B = WHEEL_BASE_CM;
+  const float R_inner = Rc_cm - (B / 2.0f);
+  const float R_outer = Rc_cm + (B / 2.0f);
+  if (R_inner <= 0.5f) {
+    if (leftTurn) pivotLeft(pwmOuterMax); else pivotRight(pwmOuterMax);
+    delay(220); stopMotors(); return;
+  }
+  const float wheelC  = PI * WHEEL_DIAMETER_CM;
+  const float s_inner = (PI * R_inner) / 2.0f;
+  const float s_outer = (PI * R_outer) / 2.0f;
+  const long cnt_inner = (long)((s_inner / wheelC) * countsPerRev);
+  const long cnt_outer = (long)((s_outer / wheelC) * countsPerRev);
+  int pwmOuter = pwmOuterMax;
+  int pwmInner = (int)((float)pwmOuterMax * (s_inner / s_outer));
+  encoderCountL = 0; encoderCountR = 0;
+  if (leftTurn) {
+    analogWrite(L_RPWM, 0); analogWrite(L_LPWM, pwmInner);
+    analogWrite(R_RPWM, pwmOuter); analogWrite(R_LPWM, 0);
+  } else {
+    analogWrite(R_RPWM, pwmInner); analogWrite(R_LPWM, 0);
+    analogWrite(L_RPWM, 0); analogWrite(L_LPWM, pwmOuter);
+  }
+  while (true) {
+    long aL = absl(encoderCountL); long aR = absl(encoderCountR);
+    long tgtL = leftTurn ? cnt_inner : cnt_outer;
+    long tgtR = leftTurn ? cnt_outer : cnt_inner;
+    if ((aL >= tgtL) && (aR >= tgtR)) break;
+    delay(5);
+  }
+  stopMotors();
 }
 
+void smoothTurnLeft()  { smoothTurnArc90(true,  TURN_RADIUS_CM, TURN_PWM); }
+void smoothTurnRight() { smoothTurnArc90(false, TURN_RADIUS_CM, TURN_PWM); }
 
 void moveForward(int pwmValR, int pwmValL) {
   analogWrite(R_RPWM, pwmValR); analogWrite(R_LPWM, 0);
@@ -396,143 +448,83 @@ long readUltrasonic(int trigPin, int echoPin) {
   digitalWrite(trigPin, HIGH); delayMicroseconds(10);
   digitalWrite(trigPin, LOW);
   long duration = pulseIn(echoPin, HIGH, 25000);
-  if (duration == 0) return -1;
-  return duration * 0.034 / 2;
+  return (duration == 0) ? -1 : (duration * 0.034 / 2);
 }
 
 void countEncoderL() {
-  int A = digitalRead(L_ENC_A);
-  int B = digitalRead(L_ENC_B);
-  if (A == B) { encoderCountL++; }
-  else        { encoderCountL--; }
+  if (digitalRead(L_ENC_A) == digitalRead(L_ENC_B)) encoderCountL++; else encoderCountL--;
 }
 
 void countEncoderR() {
-  int A = digitalRead(R_ENC_A);
-  int B = digitalRead(R_ENC_B);
-  if (A == B) { encoderCountR--; }
-  else        { encoderCountR++; }
+  if (digitalRead(R_ENC_A) == digitalRead(R_ENC_B)) encoderCountR--; else encoderCountR++;
 }
 
-void moveForwardDistance(int distance_cm, int pwmVal) {
-  const float wheelCircumference = PI * WHEEL_DIAMETER_CM;
-  const long targetCounts = (long)(((float)distance_cm / wheelCircumference) * countsPerRev);
-  noInterrupts();
-  encoderCountL = 0;
-  encoderCountR = 0;
-  interrupts();
-  moveForward(pwmVal, pwmVal);
-  while (true) {
-    noInterrupts();
-    long currentL = encoderCountL;
-    long currentR = encoderCountR;
-    interrupts();
-    if ((abs(currentL) + abs(currentR)) / 2 >= targetCounts) {
-      break;
-    }
-    delay(10);
-  }
-  stopMotors();
+// ===============================================================
+//             FUNCTIONS from LINE FOLLOWER
+// ===============================================================
+
+void stopMotors(){
+  analogWrite(R_RPWM, 0); analogWrite(R_LPWM, 0);
+  analogWrite(L_RPWM, 0); analogWrite(L_LPWM, 0);
 }
 
-void pivot180(int pwmVal) {
-  const float wheelCircumference = PI * WHEEL_DIAMETER_CM;
-  const float turnDistance = PI * (WHEEL_BASE_CM / 2.0f);
-  const long targetCounts = (long)((turnDistance / wheelCircumference) * countsPerRev);
-  encoderCountL = 0;
-  encoderCountR = 0;
-  pivotRight(pwmVal);
-  while(abs(encoderCountL) < targetCounts || abs(encoderCountR) < targetCounts) {
-    if (abs(encoderCountL) >= targetCounts) { analogWrite(L_RPWM, 0); analogWrite(L_LPWM, 0); }
-    if (abs(encoderCountR) >= targetCounts) { analogWrite(R_RPWM, 0); analogWrite(R_LPWM, 0); }
-    delay(5);
-  }
-  stopMotors();
+void setMotorSpeeds(int leftPWM, int rightPWM){
+  leftPWM  = clamp(leftPWM,  0, 255);
+  rightPWM = clamp(rightPWM, 0, 255);
+  analogWrite(R_RPWM, rightPWM); analogWrite(R_LPWM, 0); // Right forward
+  analogWrite(L_RPWM, 0);        analogWrite(L_LPWM, leftPWM);  // Left forward
 }
 
-static void smoothTurnArc90(bool leftTurn, float Rc_cm, int pwmOuterMax) {
-  const float B = WHEEL_BASE_CM;
-  const float R_inner = Rc_cm - (B / 2.0f);
-  const float R_outer = Rc_cm + (B / 2.0f);
-
-  if (R_inner <= 0.5f) {
-    if (leftTurn) pivotLeft(pwmOuterMax);
-    else          pivotRight(pwmOuterMax);
-    delay(500); // Increased delay for a more complete pivot
-    stopMotors();
-    return;
+uint8_t readSensorsMask(){
+  uint8_t mask = 0;
+  for(int i=0; i<8; i++){
+    if (digitalRead(sensorPins[i]) == HIGH) mask |= (1 << i);
   }
-
-  const float wheelC  = PI * WHEEL_DIAMETER_CM;
-  const float s_inner = (PI * R_inner) / 2.0f;
-  const float s_outer = (PI * R_outer) / 2.0f;
-
-  const long cnt_inner = (long)((s_inner / wheelC) * countsPerRev);
-  const long cnt_outer = (long)((s_outer / wheelC) * countsPerRev);
-
-  int pwmOuter = pwmOuterMax;
-  int pwmInner = (int)((float)pwmOuterMax * (s_inner / s_outer));
-  const int pwmMin = 38;
-  pwmInner = constrain(pwmInner, pwmMin, pwmOuter);
-
-  encoderCountL = 0;
-  encoderCountR = 0;
-
-  if (leftTurn) {
-    analogWrite(L_RPWM, 0);        analogWrite(L_LPWM, pwmInner);
-    analogWrite(R_RPWM, pwmOuter); analogWrite(R_LPWM, 0);
-  } else {
-    analogWrite(R_RPWM, pwmInner); analogWrite(R_LPWM, 0);
-    analogWrite(L_RPWM, 0);        analogWrite(L_LPWM, pwmOuter);
-  }
-
-  while (true) {
-    long aL = abs(encoderCountL);
-    long aR = abs(encoderCountR);
-    long tgtL = leftTurn ? cnt_inner : cnt_outer;
-    long tgtR = leftTurn ? cnt_outer : cnt_inner;
-    bool L_done = (aL >= tgtL);
-    bool R_done = (aR >= tgtR);
-    if (L_done && R_done) break;
-
-    if (L_done) { analogWrite(L_RPWM, 0); analogWrite(L_LPWM, 0); }
-    if (R_done) { analogWrite(R_RPWM, 0); analogWrite(R_LPWM, 0); }
-    delay(5);
-  }
-  stopMotors();
+  return mask;
 }
 
-void smoothTurnLeft()  { smoothTurnArc90(true,  TURN_RADIUS_CM, TURN_PWM_WALL); }
-void smoothTurnRight() { smoothTurnArc90(false, TURN_RADIUS_CM, TURN_PWM_WALL); }
+bool computePosition(float &posOut){
+  static const float W[8] = {-3.5, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5, 3.5};
+  uint8_t m = readSensorsMask();
+  float num = 0.0f, den = 0.0f;
+  for(int i=0; i<8; i++){
+    if ((m >> i) & 1){ num += W[i]; den += 1.0f; }
+  }
+  if (den <= 0.0f) return false;
+  posOut = num / den;
+  return true;
+}
 
-void turnLeft90() {
+bool isHardLeft(uint8_t m){
+  return ((m & 0b00000111) != 0) && !((m & (1<<3)) || (m & (1<<4))) && ((m & 0b11100000) == 0);
+}
+
+bool isHardRight(uint8_t m){
+  return ((m & 0b11100000) != 0) && !((m & (1<<3)) || (m & (1<<4))) && ((m & 0b00000111) == 0);
+}
+
+void turnLeft90(){
   int okCount = 0;
   uint32_t watchdog = millis() + 1500;
   while (millis() < watchdog){
     pivotLeft(turnPWM_line);
-    uint8_t m = readLineSensors();
-    if ((m & (1<<3)) || (m & (1<<4))) {
-      if (++okCount >= reacquireCount) break;
-    }
+    uint8_t m = readSensorsMask();
+    if ((m & (1<<3)) || (m & (1<<4))) { if (++okCount >= reacquireCount) break; }
     else okCount = 0;
     delay(5);
   }
-  stopMotors();
-  delay(60);
+  stopMotors(); delay(60);
 }
 
-void turnRight90() {
+void turnRight90(){
   int okCount = 0;
   uint32_t watchdog = millis() + 1500;
   while (millis() < watchdog){
     pivotRight(turnPWM_line);
-    uint8_t m = readLineSensors();
-    if ((m & (1<<3)) || (m & (1<<4))) {
-      if (++okCount >= reacquireCount) break;
-    }
+    uint8_t m = readSensorsMask();
+    if ((m & (1<<3)) || (m & (1<<4))) { if (++okCount >= reacquireCount) break; }
     else okCount = 0;
     delay(5);
   }
-  stopMotors();
-  delay(60);
+  stopMotors(); delay(60);
 }
