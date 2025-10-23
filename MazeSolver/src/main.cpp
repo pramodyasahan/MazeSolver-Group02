@@ -56,7 +56,7 @@ const int OPEN_SPACE_THRESHOLD_CM = 50; // side "very open" heuristic
 const int DEAD_END_THRESHOLD      = 12; // <<< NEW: Threshold for detecting a dead end on all sides
 
 // ==================== Wall Following ====================
-const int   BASE_PWM_STRAIGHT = 50;
+const int   BASE_PWM_STRAIGHT = 60;
 const float Kp                = 1.5f; // P gain for wall following
 const int   MAX_CORRECTION    = 20;
 const int   WALL_DETECT_RANGE = 25;
@@ -159,21 +159,59 @@ void loop() {
   }
   // ---------- STATE 3: Path clear (wall following) ----------
   else {
+    int leftSpeed, rightSpeed;
+
+    // Case 1: Both walls are visible — maintain equal distance
     if (leftValid && rightValid && dLeft < WALL_DETECT_RANGE && dRight < WALL_DETECT_RANGE) {
-      int error = (int)(dLeft - dRight);
+      int error = (int)(dLeft - dRight);         // +ve → closer to right wall, need correction left
       int correction = (int)(Kp * error);
       correction = constrain(correction, -MAX_CORRECTION, MAX_CORRECTION);
 
-      int leftSpeed  = constrain(BASE_PWM_STRAIGHT - correction, 0, 100);
-      int rightSpeed = constrain(BASE_PWM_STRAIGHT + correction, 0, 100);
+      leftSpeed  = constrain(BASE_PWM_STRAIGHT - correction, 0, 100);
+      rightSpeed = constrain(BASE_PWM_STRAIGHT + correction, 0, 100);
 
-      moveForward(rightSpeed, leftSpeed);
-    } else {
-      Serial.println("Straight");
-      moveForward(BASE_PWM_STRAIGHT, BASE_PWM_STRAIGHT);
+      Serial.print("Dual Wall Follow | Error: ");
+      Serial.println(error);
     }
-  }
 
+    // Case 2: Only left wall detected — maintain 6 cm from it
+    else if (leftValid && dLeft < 10) {
+      int targetDist = 6; // cm
+      int error = (int)(dLeft - targetDist);
+      int correction = (int)(Kp * error);
+      correction = constrain(correction, -MAX_CORRECTION, MAX_CORRECTION);
+
+      leftSpeed  = constrain(BASE_PWM_STRAIGHT + correction, 0, 100);
+      rightSpeed = constrain(BASE_PWM_STRAIGHT - correction, 0, 100);
+
+      Serial.print("Left Wall Follow | Error: ");
+      Serial.println(error);
+    }
+
+    // Case 3: Only right wall detected — maintain 6 cm from it
+    else if (rightValid && dRight < 10) {
+      int targetDist = 6; // cm
+      int error = (int)(targetDist - dRight);
+      int correction = (int)(Kp * error);
+      correction = constrain(correction, -MAX_CORRECTION, MAX_CORRECTION);
+
+      leftSpeed  = constrain(BASE_PWM_STRAIGHT - correction, 0, 100);
+      rightSpeed = constrain(BASE_PWM_STRAIGHT + correction, 0, 100);
+
+      Serial.print("Right Wall Follow | Error: ");
+      Serial.println(error);
+    }
+
+    // Case 4: No nearby wall — move straight
+    else {
+      leftSpeed = BASE_PWM_STRAIGHT;
+      rightSpeed = BASE_PWM_STRAIGHT;
+      Serial.println("No wall detected → Straight");
+    }
+
+    moveForward(rightSpeed, leftSpeed);
+  }
+  
   delay(20);
 }
 
