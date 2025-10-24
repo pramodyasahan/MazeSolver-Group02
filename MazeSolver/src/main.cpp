@@ -154,6 +154,20 @@ void loop() {
     stopMotors();
     delay(200);
 
+    // Step 2: Use sensors to decide which way to turn to escape
+    if (dLeft > dRight) {
+      Serial.println("Turning left towards open space.");
+      pivotLeft(TURN_PWM);
+      // Pivot for a short duration to change direction. Tune this value if needed.
+      delay(350);
+    } else {
+      Serial.println("Turning right towards open space.");
+      pivotRight(TURN_PWM);
+      delay(350);
+    }
+    stopMotors();
+    delay(200);
+
     // Reset stuck variables to give the robot a fresh start
     lastEncoderCountL = encoderCountL;
     lastEncoderCountR = encoderCountR;
@@ -414,6 +428,7 @@ void smoothTurnRight() { smoothTurnArc90(false, TURN_RADIUS_CM, TURN_PWM); }
 // ===============================================================
 //                  HELPERS
 // ===============================================================
+
 void stopMotors() {
   stopRight(); stopLeft();
 }
