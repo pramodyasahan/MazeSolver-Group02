@@ -1,0 +1,140 @@
+void stopMotors();
+long readUltrasonic(int trigPin, int echoPin);
+void countEncoderL();
+void countEncoderR();
+void smoothTurnLeft();
+void smoothTurnRight();
+void moveForward(int pwmValR, int pwmValL);
+void moveBackward(int pwmVal);
+void pivotLeft(int pwmVal);
+void pivotRight(int pwmVal);
+void pivot180(int pwmVal);
+void moveForwardDistance(int distance_cm, int pwmVal);
+void wallFollowingMode();
+
+#define TRIG_FRONT 48
+#define ECHO_FRONT 49
+#define TRIG_RIGHT 50
+#define ECHO_RIGHT 51
+#define TRIG_LEFT  52
+#define ECHO_LEFT  53
+
+#define L_RPWM 4
+#define L_LPWM 5
+#define L_REN  6
+#define L_LEN  7
+
+#define R_RPWM 2
+#define R_LPWM 3
+#define R_REN  9
+#define R_LEN  8
+
+#define L_ENC_A 18
+#define L_ENC_B 19
+#define R_ENC_A 20
+#define R_ENC_B 21
+
+void wallFollowingMode() {
+  long dFront = readUltrasonic(TRIG_FRONT, ECHO_FRONT);
+  long dLeft  = readUltrasonic(TRIG_LEFT,  ECHO_LEFT);
+  long dRight = readUltrasonic(TRIG_RIGHT, ECHO_RIGHT);
+
+  bool frontValid = dFront > 0;
+  bool leftValid  = dLeft  > 0;
+  bool rightValid = dRight > 0;
+
+  Serial.print("F:"); Serial.print(dFront);
+  Serial.print(" L:"); Serial.print(dLeft);
+  Serial.print(" R:"); Serial.println(dRight);
+
+  // ---------- STATE 1: Dead End ----------
+  if (frontValid && dFront < DEAD_END_THRESHOLD &&
+      leftValid  && dLeft  < DEAD_END_THRESHOLD &&
+      rightValid && dRight < DEAD_END_THRESHOLD)
+  {
+      Serial.println("--- DEAD END: Executing 180 turn ---");
+      stopMotors();
+      delay(100);
+      pivot180(PIVOT_180_PWM);
+      stopMotors();
+      delay(100);
+  }
+  // ---------- STATE 2: Obstacle Ahead ----------
+  else if (frontValid && dFront < OBSTACLE_THRESHOLD) {
+    stopMotors();
+    delay(100);
+
+    bool turnLeft = (dLeft > dRight);
+    bool isUTurn = false;
+    if (turnLeft && dLeft > OPEN_SPACE_THRESHOLD_CM)   isUTurn = true;
+    if (!turnLeft && dRight > OPEN_SPACE_THRESHOLD_CM) isUTurn = true;
+
+    if (!isUTurn && leftValid && rightValid && (abs(dLeft - dRight) > ALIGN_TOLERANCE_CM)) {
+      Serial.println("--- Aligning ---");
+      if (dLeft < dRight) { pivotLeft(ALIGN_PWM); }
+      else                { pivotRight(ALIGN_PWM); }
+      delay(ALIGN_DURATION_MS);
+      stopMotors();
+      delay(100);
+    } else if (isUTurn) {
+      Serial.println("--- U-Turn: skipping align ---");
+    }
+
+    if (turnLeft) smoothTurnLeft();
+    else          smoothTurnRight();
+
+    stopMotors();
+    delay(100);
+  }
+  // ---------- STATE 3: No Wall on Left ----------
+  else if (leftValid && dLeft > NO_WALL_THRESHOLD) {
+    Serial.println("--- No left wall. Clearing corner... ---");
+    moveForwardDistance(CORNER_CLEARANCE_CM, BASE_PWM_STRAIGHT);
+    
+    Serial.println("--- Corner cleared. Initiating left turn. ---");
+    stopMotors();
+    delay(10);
+    smoothTurnLeft();
+    stopMotors();
+    delay(150);
+  }
+  // ---------- STATE 4: Path Clear (Follow Wall) ----------
+  else {
+    int leftSpeed, rightSpeed;
+
+    if (leftValid && rightValid && dLeft < WALL_DETECT_RANGE && dRight < WALL_DETECT_RANGE) {
+      int error = (int)(dLeft - dRight);
+      int correction = (int)(Kp * error);
+      correction = constrain(correction, -MAX_CORRECTION, MAX_CORRECTION);
+      leftSpeed  = constrain(BASE_PWM_STRAIGHT - correction, 0, 100);
+      rightSpeed = constrain(BASE_PWM_STRAIGHT + correction, 0, 100);
+      Serial.print("Dual Wall Follow | Error: "); Serial.println(error);
+    }
+    else if (leftValid && dLeft < 10) {
+      int targetDist = 6;
+      int error = (int)(dLeft - targetDist);
+      int correction = (int)(Kp * error);
+      correction = constrain(correction, -MAX_CORRECTION, MAX_CORRECTION);
+      leftSpeed  = constrain(BASE_PWM_STRAIGHT + correction, 0, 100);
+      rightSpeed = constrain(BASE_PWM_STRAIGHT - correction, 0, 100);
+      Serial.print("Left Wall Follow | Error: "); Serial.println(error);
+    }
+    else if (rightValid && dRight < 10) {
+      int targetDist = 6;
+      int error = (int)(targetDist - dRight);
+      int correction = (int)(Kp_Wall * error);
+      correction = constrain(correction, -MAX_CORRECTION, MAX_CORRECTION);
+      leftSpeed  = constrain(BASE_PWM_STRAIGHT - correction, 0, 100);
+      rightSpeed = constrain(BASE_PWM_STRAIGHT + correction, 0, 100);
+      Serial.print("Right Wall Follow | Error: "); Serial.println(error);
+    }
+    else {
+      leftSpeed = BASE_PWM_STRAIGHT;
+      rightSpeed = BASE_PWM_STRAIGHT;
+      Serial.println("No wall detected -> Straight");
+    }
+    moveForward(rightSpeed, leftSpeed);
+  }
+
+  delay(10);
+}
