@@ -21,9 +21,9 @@ uint8_t sensorBits = 0; // bit i = 1 if sensor i sees black
 const bool BLACK_IS_HIGH = true;
 
 // Convenience groupings (0 = far-left, 7 = far-right)
-const uint8_t CENTER_IDX[2] = {3,4};
-const uint8_t LEFT_IDX[3]   = {0,1,2};
-const uint8_t RIGHT_IDX[3]  = {5,6,7};
+const uint8_t CENTER_IDX[2] = {3, 4};
+const uint8_t LEFT_IDX[3]   = {0, 1, 2};
+const uint8_t RIGHT_IDX[3]  = {5, 6, 7};
 
 // How strong a “left/right feature” must be to treat as a corner
 const uint8_t LEFT_STRONG_MIN  = 2;
@@ -48,7 +48,7 @@ float integral = 0, derivative = 0, correction = 0;
 
 // ====================== Function Prototypes ======================
 void readSensors();
-float getLineError();               // returns ~[-3.5..+3.5]; uses lastError if no blacks
+float getLineError();               
 void setMotorSpeeds(int leftSpeed, int rightSpeed);
 void stopMotors();
 
@@ -62,6 +62,8 @@ void brake(uint16_t ms);
 void pivotLeftUntilCenter();
 void pivotRightUntilCenter();
 void searchWhenLost();
+
+void lineFollowingMode(); // <-- New function
 
 // ====================== Setup ======================
 void setup() {
@@ -91,6 +93,16 @@ void setup() {
 
 // ====================== Main Loop ======================
 void loop() {
+  // For now, just call line following mode
+  // Later, you can call wallFollowingMode() or switch between modes
+  lineFollowingMode();
+}
+
+// ===============================================================
+//                  Function Definitions
+// ===============================================================
+
+void lineFollowingMode() {
   readSensors();
 
   // 1) If we see a strong corner on one side and center is not on line, snap pivot
@@ -98,11 +110,13 @@ void loop() {
     brake(BRAKE_MS);
     pivotLeftUntilCenter();
     brake(BRAKE_MS);
-  } else if (strongRightFeature() && !centerOnLine()) {
+  } 
+  else if (strongRightFeature() && !centerOnLine()) {
     brake(BRAKE_MS);
     pivotRightUntilCenter();
     brake(BRAKE_MS);
-  } else {
+  } 
+  else {
     // 2) Normal PID tracking (with smooth recovery when line is momentarily lost)
     if (!anyOnLine()) {
       searchWhenLost();
@@ -116,19 +130,118 @@ void loop() {
     lastError = error;
 
     int leftSpeed  = constrain((int)(baseSpeed + correction),  0, maxPWM);
-    int rightSpeed = constrain((int)(baseSpeed - correction),  0, maxPWM);
+    int rightSpeed = constrain((int)(baseSpeed - correction), 0, maxPWM);
 
     setMotorSpeeds(leftSpeed, rightSpeed);
   }
 
-  // Small loop delay for stability
   delay(5);
 }
 
-// ===============================================================
-//                  Function Definitions
-// ===============================================================
+void pivotLeft90UntilLine(int pwmVal) {
+  // Calculate the target encoder counts for a full 90-degree turn
+  const float wheelCircumference = PI * WHEEL_DIAMETER_CM;
+  const float turnDistance = (PI * WHEEL_BASE_CM) / 4.0f; // 1/4 of the full circle circumference
+  const long targetCounts = (long)((turnDistance / wheelCircumference) * countsPerRev);
 
+  Serial.println("Pivoting left (max 90 deg) until line is found...");
+
+  // Reset encoders safely
+  noInterrupts();
+  encoderCountL = 0;
+  encoderCountR = 0;
+  interrupts();
+
+  // Start pivoting left
+  pivotLeft(pwmVal);
+
+  bool lineWasFound = false;
+
+  // Loop until EITHER the 90-degree turn is complete OR a line is detected
+  while (absl(encoderCountL) < targetCounts || absl(encoderCountR) < targetCounts) {
+    
+    // Check the line sensors in every loop iteration
+    readSensors();
+    if (anyOnLine()) {
+      lineWasFound = true;
+      break; // Exit the loop immediately if a line is found
+    }
+
+    // If one wheel reaches the target count first, stop it to prevent overshooting
+    if (absl(encoderCountL) >= targetCounts) { stopLeft(); }
+    if (absl(encoderCountR) >= targetCounts) { stopRight(); }
+    
+    delay(5); // Small delay to allow motors to run and not overwhelm the CPU
+  }
+
+  stopMotors(); // Stop all movement
+
+  if (lineWasFound) {
+    Serial.println("Line found! Stopping pivot.");
+  } else {
+    Serial.println("90-degree pivot completed, line was not found.");
+  }
+}
+
+
+/**
+ * @brief Pivots the robot up to 90 degrees to the right, stopping early
+ *        if a line is detected.
+ * 
+ * @param pwmVal The motor speed (0-255) to use for the pivot.
+ */
+void pivotRight90UntilLine(int pwmVal) {
+  // Calculation is identical to the left pivot
+  const float wheelCircumference = PI * WHEEL_DIAMETER_CM;
+  const float turnDistance = (PI * WHEEL_BASE_CM) / 4.0f;
+  const long targetCounts = (long)((turnDistance / wheelCircumference) * countsPerRev);
+
+  Serial.println("Pivoting right (max 90 deg) until line is found...");
+
+  // Reset encoders safely
+  noInterrupts();
+  encoderCountL = 0;
+  encoderCountR = 0;
+  interrupts();
+
+  // Start pivoting right
+  pivotRight(pwmVal);
+
+  bool lineWasFound = false;
+
+  // Loop until EITHER the 90-degree turn is complete OR a line is detected
+  while (absl(encoderCountL) < targetCounts || absl(encoderCountR) < targetCounts) {
+    
+    // Check the line sensors in every loop iteration
+    readSensors();
+    if (anyOnLine()) {
+      lineWasFound = true;
+      break; // Exit the loop immediately if a line is found
+    }
+
+    // If one wheel reaches the target count first, stop it
+    if (absl(encoderCountL) >= targetCounts) { stopLeft(); }
+    if (absl(encoderCountR) >= targetCounts) { stopRight(); }
+    
+    delay(5);
+  }
+
+  stopMotors();
+
+  if (lineWasFound) {
+    Serial.println("Line found! Stopping pivot.");
+  } else {
+    Serial.println("90-degree pivot completed, line was not found.");
+  }
+}
+
+void searchWhenLost() {
+  pivotLeft90UntilLine(50);
+  pivotRight90UntilLine(50);
+  pivotRight90UntilLine(50);
+}
+
+// ====================== Sensor and Motor Functions ======================
 void readSensors() {
   sensorBits = 0;
   for (int i = 0; i < 8; i++) {
@@ -139,7 +252,6 @@ void readSensors() {
   }
 }
 
-// Weighted error: outer sensors have larger magnitude so turns are detected earlier
 float getLineError() {
   static const float weight[8] = {-3.5, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5, 3.5};
   float sumW = 0.0f, sum = 0.0f;
@@ -148,16 +260,11 @@ float getLineError() {
     if (sensorVal[i]) { sumW += weight[i]; sum += 1.0f; }
   }
 
-  if (sum == 0.0f) {
-    // No line currently under any sensor → keep prior heading
-    return lastError;
-  }
-
-  return sumW / sum; // normalized error roughly in [-3.5, +3.5]
+  if (sum == 0.0f) return lastError;
+  return sumW / sum;
 }
 
 void setMotorSpeeds(int leftSpeed, int rightSpeed) {
-  // Your original wiring: Right forward uses R_RPWM, Left forward uses L_LPWM
   analogWrite(R_RPWM, rightSpeed);
   analogWrite(R_LPWM, 0);
   analogWrite(L_RPWM, 0);
@@ -171,7 +278,7 @@ void stopMotors() {
   analogWrite(L_LPWM, 0);
 }
 
-// ====================== Corner / Recovery helpers ======================
+// ====================== Corner / Recovery Helpers ======================
 bool anyOnLine() { return sensorBits != 0; }
 bool centerOnLine() { return sensorVal[CENTER_IDX[0]] || sensorVal[CENTER_IDX[1]]; }
 
@@ -181,13 +288,12 @@ uint8_t countBlk(const uint8_t idxs[], uint8_t n) {
   return c;
 }
 
-// “Strong” side feature = ≥2 blacks on that edge while the opposite edge is mostly white.
-// This triggers a decisive pivot rather than letting PID average the corner away.
 bool strongLeftFeature() {
   uint8_t L = countBlk(LEFT_IDX, 3);
   uint8_t R = countBlk(RIGHT_IDX, 3);
   return (L >= LEFT_STRONG_MIN) && (R <= 1);
 }
+
 bool strongRightFeature() {
   uint8_t L = countBlk(LEFT_IDX, 3);
   uint8_t R = countBlk(RIGHT_IDX, 3);
@@ -196,48 +302,48 @@ bool strongRightFeature() {
 
 void brake(uint16_t ms) { stopMotors(); delay(ms); }
 
-// In-place left pivot until a center sensor re-locks the line (or timeout)
 void pivotLeftUntilCenter() {
   unsigned long t0 = millis();
   while (millis() - t0 < PIVOT_TIMEOUT_MS) {
-    // Right forward, Left backward
-    analogWrite(R_RPWM, TURN_PWM); analogWrite(R_LPWM, 0);
-    analogWrite(L_RPWM, TURN_PWM); analogWrite(L_LPWM, 0);
+    analogWrite(R_RPWM, TURN_PWM);
+    analogWrite(R_LPWM, 0);
+    analogWrite(L_RPWM, TURN_PWM);
+    analogWrite(L_LPWM, 0);
     readSensors();
     if (centerOnLine()) break;
     delay(4);
   }
 }
 
-// In-place right pivot until center sensors see the line
 void pivotRightUntilCenter() {
   unsigned long t0 = millis();
   while (millis() - t0 < PIVOT_TIMEOUT_MS) {
-    // Right backward, Left forward
-    analogWrite(R_RPWM, 0);        analogWrite(R_LPWM, TURN_PWM);
-    analogWrite(L_RPWM, 0);        analogWrite(L_LPWM, TURN_PWM);
+    analogWrite(R_RPWM, 0);
+    analogWrite(R_LPWM, TURN_PWM);
+    analogWrite(L_RPWM, 0);
+    analogWrite(L_LPWM, TURN_PWM);
     readSensors();
     if (centerOnLine()) break;
     delay(4);
   }
 }
 
-// When no sensors see the line, rotate toward the last error direction to re-acquire quickly
 void searchWhenLost() {
   if (lastError >= 0) {
-    // rotate right gently
-    analogWrite(R_RPWM, 0);        analogWrite(R_LPWM, baseSpeed);
-    analogWrite(L_RPWM, 0);        analogWrite(L_LPWM, baseSpeed);
+    analogWrite(R_RPWM, 0);
+    analogWrite(R_LPWM, baseSpeed);
+    analogWrite(L_RPWM, 0);
+    analogWrite(L_LPWM, baseSpeed);
   } else {
-    // rotate left gently
-    analogWrite(R_RPWM, baseSpeed); analogWrite(R_LPWM, 0);
-    analogWrite(L_RPWM, baseSpeed); analogWrite(L_LPWM, 0);
+    analogWrite(R_RPWM, baseSpeed);
+    analogWrite(R_LPWM, 0);
+    analogWrite(L_RPWM, baseSpeed);
+    analogWrite(L_LPWM, 0);
   }
-  // brief search window, rechecking sensors
   unsigned long t0 = millis();
   while (millis() - t0 < 150) {
     readSensors();
     if (anyOnLine()) break;
-    delay(4);
+   delay(4);
   }
 }
