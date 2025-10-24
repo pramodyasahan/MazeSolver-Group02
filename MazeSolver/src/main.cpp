@@ -47,9 +47,9 @@ const int gearRatio         = 20;
 const int countsPerRev      = pulsesPerMotorRev * gearRatio * 2; // 11*20*2 = 440
 
 // ==================== Turning Configuration ====================
-const int   TURN_PWM       = 50;     // outer wheel PWM during arc
+const int   TURN_PWM       = 80;     // outer wheel PWM during arc
 const float TURN_RADIUS_CM = 10.0f;  // robot center arc radius; if too small we pivot
-const int   PIVOT_180_PWM  = 55;
+const int   PIVOT_180_PWM  = 85;
 
 // ==================== Navigation Thresholds ====================
 const int OBSTACLE_THRESHOLD      = 12; // start turn when front < 16 cm
@@ -59,9 +59,9 @@ const int NO_WALL_THRESHOLD       = 30; // Threshold to determine if there's no 
 const int CORNER_CLEARANCE_CM     = 5; // <<< NEW: Distance to move forward before turning at an open corner
 
 // ==================== Wall Following ====================
-const int   BASE_PWM_STRAIGHT = 60;
+const int   BASE_PWM_STRAIGHT = 80;
 const float Kp                = 1.5f; // P gain for wall following
-const int   MAX_CORRECTION    = 20;
+const int   MAX_CORRECTION    = 30;
 const int   WALL_DETECT_RANGE = 25;
 
 // ==================== Alignment ====================
@@ -180,8 +180,8 @@ void loop() {
       int error = (int)(dLeft - dRight);
       int correction = (int)(Kp * error);
       correction = constrain(correction, -MAX_CORRECTION, MAX_CORRECTION);
-      leftSpeed  = constrain(BASE_PWM_STRAIGHT - correction, 0, 100);
-      rightSpeed = constrain(BASE_PWM_STRAIGHT + correction, 0, 100);
+      leftSpeed  = constrain(BASE_PWM_STRAIGHT - correction, 0, 200);
+      rightSpeed = constrain(BASE_PWM_STRAIGHT + correction, 0, 200);
       Serial.print("Dual Wall Follow | Error: "); Serial.println(error);
     }
     else if (leftValid && dLeft < 10) {
