@@ -12,6 +12,7 @@ void moveBackward(int pwmVal);
 void pivotLeft(int pwmVal);
 void pivotRight(int pwmVal);
 void pivot180(int pwmVal);
+bool isStuck();
 void moveForwardDistance(int distance_cm, int pwmVal); // <<< NEW: Declaration for moving a set distance
 
 // ==================== Pin Definitions ====================
@@ -68,6 +69,27 @@ const int   WALL_DETECT_RANGE = 25;
 const int ALIGN_PWM         = 45;
 const int ALIGN_DURATION_MS = 50;
 const int ALIGN_TOLERANCE_CM= 1;
+
+// =================================================================//
+//                Stuck Detection & Recovery                       //
+// =================================================================//
+volatile long encoderCountL = 0;
+volatile long encoderCountR = 0;
+
+long lastEncoderCountL = 0;
+long lastEncoderCountR = 0;
+unsigned long lastStuckCheckTime = 0;
+int stuckCounter = 0;
+
+// Global variables to track commanded motor PWM
+int currentPwmL = 0;
+int currentPwmR = 0;
+
+const int STUCK_CHECK_INTERVAL_MS  = 250;
+const long ENCODER_STUCK_THRESHOLD = 8;
+const int STUCK_CONFIRMATION_COUNT = 3;
+
+// ================
 
 // ==================== Encoders ====================
 volatile long encoderCountL = 0;
