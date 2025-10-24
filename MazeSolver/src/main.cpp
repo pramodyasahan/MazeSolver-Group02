@@ -141,6 +141,30 @@ void loop() {
   Serial.print(" L:"); Serial.print(dLeft);
   Serial.print(" R:"); Serial.println(dRight);
 
+  // --- HIGHEST PRIORITY: Stuck Detection ---
+  if (isStuck()) {
+    // <<< MODIFIED: Recovery now includes a turn towards open space >>>
+    Serial.println("--- STUCK: Reversing and turning away ---");
+    stopMotors();
+    delay(200);
+
+    // Step 1: Back up to create physical space
+    moveBackward(80);
+    delay(400);
+    stopMotors();
+    delay(200);
+
+    // Reset stuck variables to give the robot a fresh start
+    lastEncoderCountL = encoderCountL;
+    lastEncoderCountR = encoderCountR;
+    lastStuckCheckTime = millis();
+    stuckCounter = 0;
+
+    return; // Restart loop to get fresh readings from the new orientation
+  }
+
+
+
   // ---------- STATE 1: Dead End / Trapped ----------
   if (frontValid && dFront < DEAD_END_THRESHOLD &&
       leftValid  && dLeft  < DEAD_END_THRESHOLD &&
