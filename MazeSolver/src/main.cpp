@@ -128,7 +128,8 @@ int maxPWM    = 100;  // clamps for smoothness
 float error = 0, lastError = 0;
 float integral = 0, derivative = 0, correction = 0;
 
-
+// ==================== Mode State ====================
+bool wallMode = true;
 
 // ==================== Setup ====================
 void setup() {
@@ -158,7 +159,25 @@ void setup() {
 // ===============================================================
 void loop() {
 
-  wallFollowingMode(); 
+    if (wallMode) {
+    wallFollowingMode();
+
+    // Check if all sensors detect white (surface)
+    int whiteCount = 0;
+    for (int i = 0; i < 8; i++) {
+      int val = digitalRead(sensorPins[i]);
+      if (val == LOW) whiteCount++;  // LOW = white
+    }
+
+    if (whiteCount >= 7) {  // all white detected
+      Serial.println("All white detected! Switching to LINE FOLLOWING MODE...");
+      delay(1000);
+      stopMotors();
+      wallMode = false;  // Switch mode
+    }
+  } else {
+    lineFollowingMode();
+  }
 
 }
 
