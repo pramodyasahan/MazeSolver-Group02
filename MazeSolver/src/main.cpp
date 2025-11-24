@@ -13,7 +13,7 @@ void pivotLeft(int pwmVal);
 void pivotRight(int pwmVal);
 void pivot180(int pwmVal);
 void moveForwardDistance(int distance_cm, int pwmVal);
-void wallFollowingMode(); // <<< NEW FUNCTION
+void wallFollowingMode();
 
 void readSensors();
 float getLineError();               
@@ -117,7 +117,7 @@ const uint16_t PIVOT_TIMEOUT_MS = 600;  // safety stop if something goes wrong
 const uint16_t BRAKE_MS = 30;
 
 // ====================== PID Parameters ======================
-float Kp = 40.0;
+float Kp = 50.0;
 float Ki = 0.0;
 float Kd = 4.0;
 
@@ -171,8 +171,11 @@ void loop() {
 
     if (whiteCount >= 7) {  // all white detected
       Serial.println("All white detected! Switching to LINE FOLLOWING MODE...");
-      delay(1000);
+
       stopMotors();
+      delay(1000);
+      moveForward(BASE_PWM_STRAIGHT, BASE_PWM_STRAIGHT);
+      delay(1000);
       wallMode = false;  // Switch mode
     }
   } else {
