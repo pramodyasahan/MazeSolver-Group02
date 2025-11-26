@@ -1,8 +1,8 @@
 #include <Arduino.h>
 
 // ==================== Bluetooth Configuration ====================
-// Using Serial2 on Arduino Mega (Pin 16 TX, Pin 17 RX)
-#define BTSerial Serial2 
+// Using Serial3 (Pin 14 TX, Pin 15 RX) on Arduino Mega
+#define BTSerial Serial3 
 
 // ==================== Declarations ====================
 void stopMotors();
@@ -137,9 +137,9 @@ bool wallMode = true;
 
 // ==================== Setup ====================
 void setup() {
-  // Initialize Bluetooth Serial
+  // Initialize Bluetooth Serial (Serial3 on Pins 14, 15)
   BTSerial.begin(9600); 
-
+  
   pinMode(TRIG_FRONT, OUTPUT); pinMode(ECHO_FRONT, INPUT);
   pinMode(TRIG_LEFT,  OUTPUT); pinMode(ECHO_LEFT,  INPUT);
   pinMode(TRIG_RIGHT, OUTPUT); pinMode(ECHO_RIGHT, INPUT);
@@ -156,7 +156,7 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(L_ENC_A), countEncoderL, CHANGE);
   attachInterrupt(digitalPinToInterrupt(R_ENC_A), countEncoderR, CHANGE);
 
-  BTSerial.println("Robot Initialized...");
+  BTSerial.println("Robot Initialized (Bluetooth Connected on Serial3)...");
 }
 
 // ===============================================================
