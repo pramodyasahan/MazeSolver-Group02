@@ -1,37 +1,9 @@
 #include <Arduino.h>
+#include <EEPROM.h>
 
 // ==================== Bluetooth Configuration ====================
 // Using Serial3 (Pin 14 TX, Pin 15 RX) on Arduino Mega
 #define BTSerial Serial3 
-
-// ==================== Declarations ====================
-void stopMotors();
-long readUltrasonic(int trigPin, int echoPin);
-void countEncoderL();
-void countEncoderR();
-void smoothTurnLeft();
-void smoothTurnRight();
-void moveForward(int pwmValR, int pwmValL);
-void moveBackward(int pwmVal);
-void pivotLeft(int pwmVal);
-void pivotRight(int pwmVal);
-void pivot180(int pwmVal);
-void moveForwardDistance(int distance_cm, int pwmVal);
-void wallFollowingMode();
-
-void readSensors();
-float getLineError();               
-void setMotorSpeeds(int leftSpeed, int rightSpeed);
-bool anyOnLine();
-bool centerOnLine();
-uint8_t countBlk(const uint8_t idxs[], uint8_t n);
-bool strongLeftFeature();
-bool strongRightFeature();
-void brake(uint16_t ms);
-void pivotLeftUntilCenter();
-void pivotRightUntilCenter();
-void searchWhenLost();
-void lineFollowingMode();
 
 // ==================== Pin Definitions ====================
 #define TRIG_FRONT 48
@@ -56,13 +28,14 @@ void lineFollowingMode();
 #define R_ENC_A 20
 #define R_ENC_B 21
 
-
 // ==================== Robot Physical Constants ====================
 const float WHEEL_DIAMETER_CM = 6.5f;
 const float WHEEL_BASE_CM     = 17.0f;
 const int pulsesPerMotorRev = 11;
 const int gearRatio         = 20;
 const int countsPerRev      = pulsesPerMotorRev * gearRatio * 2;
+// Distance per tick in cm
+const float CM_PER_TICK = (PI * WHEEL_DIAMETER_CM) / countsPerRev;
 
 // ==================== Turning Configuration ====================
 const int   TURN_PWM       = 50;
@@ -87,57 +60,90 @@ const int ALIGN_PWM         = 45;
 const int ALIGN_DURATION_MS = 50;
 const int ALIGN_TOLERANCE_CM= 1;
 
-// ==================== Encoders ====================
-volatile long encoderCountL = 0;
-volatile long encoderCountR = 0;
-
-// Helpers
-inline void stopRight(){ analogWrite(R_RPWM, 0); analogWrite(R_LPWM, 0); }
-inline void stopLeft() { analogWrite(L_RPWM, 0); analogWrite(L_LPWM, 0); }
-inline long absl(long x){ return (x < 0) ? -x : x; }
-
-
-// ====================== Line Sensors ======================
+// ==================== Line Sensors ====================
 const uint8_t sensorPins[8] = {22, 23, 24, 25, 26, 27, 28, 29};
-// After readSensors(): sensorVal[i] == 1 means "black", 0 means "white"
 uint8_t sensorVal[8];
-uint8_t sensorBits = 0; // bit i = 1 if sensor i sees black
-
-// Set this to false if your board reads LOW on black.
+uint8_t sensorBits = 0; 
 const bool BLACK_IS_HIGH = true;
 
-// Convenience groupings (0 = far-left, 7 = far-right)
 const uint8_t CENTER_IDX[2] = {3, 4};
 const uint8_t LEFT_IDX[3]   = {0, 1, 2};
 const uint8_t RIGHT_IDX[3]  = {5, 6, 7};
 
-// How strong a “left/right feature” must be to treat as a corner
 const uint8_t LEFT_STRONG_MIN  = 2;
 const uint8_t RIGHT_STRONG_MIN = 2;
-
-// Pivot behavior at corners
-const int TURN_PWM_LINE = 140;               // strong pivot power
-const uint16_t PIVOT_TIMEOUT_MS = 600;  // safety stop if something goes wrong
+const int TURN_PWM_LINE = 140; 
+const uint16_t PIVOT_TIMEOUT_MS = 600;
 const uint16_t BRAKE_MS = 30;
 
-// ====================== PID Parameters ======================
+// ==================== PID Parameters ====================
 float Kp = 50.0;
 float Ki = 0.0;
 float Kd = 4.0;
+int baseSpeed = 50; 
+int maxPWM    = 100;
 
-int baseSpeed = 50;   // cruise speed
-int maxPWM    = 100;  // clamps for smoothness
+// ==================== Global Variables ====================
+volatile long encoderCountL = 0;
+volatile long encoderCountR = 0;
 
-// ====================== Variables ======================
 float error = 0, lastError = 0;
 float integral = 0, derivative = 0, correction = 0;
-
-// ==================== Mode State ====================
 bool wallMode = true;
+
+// Odometry Variables
+double robotX = 0.0;
+double robotY = 0.0;
+double robotTheta = 0.0; 
+long lastEncL = 0;
+long lastEncR = 0;
+int eepromAddr = 0;
+const int SAVE_INTERVAL_CM = 10;
+double lastSavedX = 0.0;
+double lastSavedY = 0.0;
+
+// ==================== Function Prototypes ====================
+// (This tells the compiler these functions exist later in the file)
+void updateOdometry();
+void stopMotors();
+void stopRight();
+void stopLeft();
+long absl(long x);
+long readUltrasonic(int trigPin, int echoPin);
+void countEncoderL();
+void countEncoderR();
+void smoothTurnLeft();
+void smoothTurnRight();
+void moveForward(int pwmValR, int pwmValL);
+void moveBackward(int pwmVal);
+void pivotLeft(int pwmVal);
+void pivotRight(int pwmVal);
+void pivot180(int pwmVal);
+void moveForwardDistance(int distance_cm, int pwmVal);
+void wallFollowingMode();
+void readSensors();
+float getLineError();               
+void setMotorSpeeds(int leftSpeed, int rightSpeed);
+bool anyOnLine();
+bool centerOnLine();
+uint8_t countBlk(const uint8_t idxs[], uint8_t n);
+bool strongLeftFeature();
+bool strongRightFeature();
+void brake(uint16_t ms);
+void pivotLeftUntilCenter();
+void pivotRightUntilCenter();
+void pivotLeft90UntilLine(int pwmVal);
+void pivotRight90UntilLine(int pwmVal);
+void searchWhenLost();
+void lineFollowingMode();
+
+// ==================== Inline Helpers ====================
+inline void stopRight(){ analogWrite(R_RPWM, 0); analogWrite(R_LPWM, 0); }
+inline void stopLeft() { analogWrite(L_RPWM, 0); analogWrite(L_LPWM, 0); }
+inline long absl(long x){ return (x < 0) ? -x : x; }
 
 // ==================== Setup ====================
 void setup() {
-  // Initialize Bluetooth Serial (Serial3 on Pins 14, 15)
   BTSerial.begin(9600); 
   
   pinMode(TRIG_FRONT, OUTPUT); pinMode(ECHO_FRONT, INPUT);
@@ -156,42 +162,88 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(L_ENC_A), countEncoderL, CHANGE);
   attachInterrupt(digitalPinToInterrupt(R_ENC_A), countEncoderR, CHANGE);
 
-  BTSerial.println("Robot Initialized (Bluetooth Connected on Serial3)...");
+  BTSerial.println("Robot Initialized... Recording Path.");
+  
+  // Save start point
+  int startX = 0; int startY = 0;
+  EEPROM.put(eepromAddr, startX); eepromAddr += sizeof(int);
+  EEPROM.put(eepromAddr, startY); eepromAddr += sizeof(int);
 }
 
-// ===============================================================
-//                  MAIN LOOP
-// ===============================================================
+// ==================== Main Loop ====================
 void loop() {
+    updateOdometry();
 
     if (wallMode) {
-    wallFollowingMode();
+        wallFollowingMode();
 
-    // Check if all sensors detect white (surface)
-    int whiteCount = 0;
-    for (int i = 0; i < 8; i++) {
-      int val = digitalRead(sensorPins[i]);
-      if (val == LOW) whiteCount++;  // LOW = white
+        // Check for line
+        int whiteCount = 0;
+        for (int i = 0; i < 8; i++) {
+            if (digitalRead(sensorPins[i]) == LOW) whiteCount++;
+        }
+
+        if (whiteCount >= 7) { 
+            BTSerial.println("All white detected! Switching to LINE FOLLOWING...");
+            stopMotors();
+            delay(1000);
+            moveForward(BASE_PWM_STRAIGHT, BASE_PWM_STRAIGHT);
+            delay(1000);
+            wallMode = false;
+        }
+    } else {
+        lineFollowingMode();
     }
-
-    if (whiteCount >= 7) {  // all white detected
-      BTSerial.println("All white detected! Switching to LINE FOLLOWING MODE...");
-
-      stopMotors();
-      delay(1000);
-      moveForward(BASE_PWM_STRAIGHT, BASE_PWM_STRAIGHT);
-      delay(1000);
-      wallMode = false;  // Switch mode
-    }
-  } else {
-    lineFollowingMode();
-  }
-
 }
 
-// ===============================================================
-//                 WALL FOLLOWING MODE FUNCTION
-// ===============================================================
+// ==================== Odometry Logic ====================
+void updateOdometry() {
+  noInterrupts();
+  long curL = encoderCountL;
+  long curR = encoderCountR;
+  interrupts();
+
+  long dL_ticks = curL - lastEncL;
+  long dR_ticks = curR - lastEncR;
+
+  if (dL_ticks == 0 && dR_ticks == 0) return;
+
+  lastEncL = curL;
+  lastEncR = curR;
+
+  double distL = dL_ticks * CM_PER_TICK;
+  double distR = dR_ticks * CM_PER_TICK;
+  double distCenter = (distL + distR) / 2.0;
+  double dTheta = (distR - distL) / WHEEL_BASE_CM;
+
+  robotTheta += dTheta;
+  if (robotTheta > PI)  robotTheta -= TWO_PI;
+  if (robotTheta < -PI) robotTheta += TWO_PI;
+
+  robotX += distCenter * cos(robotTheta);
+  robotY += distCenter * sin(robotTheta);
+
+  BTSerial.print("POS:");
+  BTSerial.print((int)robotX);
+  BTSerial.print(",");
+  BTSerial.println((int)robotY);
+
+  double distFromLastSave = sqrt(pow(robotX - lastSavedX, 2) + pow(robotY - lastSavedY, 2));
+
+  if (distFromLastSave >= SAVE_INTERVAL_CM) {
+    if (eepromAddr < 4090) { 
+      int xStore = (int)robotX;
+      int yStore = (int)robotY;
+      EEPROM.put(eepromAddr, xStore); eepromAddr += sizeof(int);
+      EEPROM.put(eepromAddr, yStore); eepromAddr += sizeof(int);
+      lastSavedX = robotX;
+      lastSavedY = robotY;
+      BTSerial.print(">> Saved: "); BTSerial.print(xStore); BTSerial.print(","); BTSerial.println(yStore);
+    }
+  }
+}
+
+// ==================== Wall Following Logic ====================
 void wallFollowingMode() {
   long dFront = readUltrasonic(TRIG_FRONT, ECHO_FRONT);
   long dLeft  = readUltrasonic(TRIG_LEFT,  ECHO_LEFT);
@@ -201,485 +253,216 @@ void wallFollowingMode() {
   bool leftValid  = dLeft  > 0;
   bool rightValid = dRight > 0;
 
-  BTSerial.print("F:"); BTSerial.print(dFront);
-  BTSerial.print(" L:"); BTSerial.print(dLeft);
-  BTSerial.print(" R:"); BTSerial.println(dRight);
-
-  // ---------- STATE 1: Dead End ----------
   if (frontValid && dFront < DEAD_END_THRESHOLD &&
       leftValid  && dLeft  < DEAD_END_THRESHOLD &&
-      rightValid && dRight < DEAD_END_THRESHOLD)
-  {
-      BTSerial.println("--- DEAD END: Executing 180 turn ---");
-      stopMotors();
-      delay(100);
-      pivot180(PIVOT_180_PWM);
-      stopMotors();
-      delay(100);
+      rightValid && dRight < DEAD_END_THRESHOLD) {
+      BTSerial.println("--- DEAD END ---");
+      stopMotors(); delay(100); pivot180(PIVOT_180_PWM); stopMotors(); delay(100);
   }
-  // ---------- STATE 2: Obstacle Ahead ----------
   else if (frontValid && dFront < OBSTACLE_THRESHOLD) {
-    stopMotors();
-    delay(100);
-
+    stopMotors(); delay(100);
     bool turnLeft = (dLeft > dRight);
     bool isUTurn = false;
     if (turnLeft && dLeft > OPEN_SPACE_THRESHOLD_CM)   isUTurn = true;
     if (!turnLeft && dRight > OPEN_SPACE_THRESHOLD_CM) isUTurn = true;
 
     if (!isUTurn && leftValid && rightValid && (abs(dLeft - dRight) > ALIGN_TOLERANCE_CM)) {
-      BTSerial.println("--- Aligning ---");
-      if (dLeft < dRight) { pivotLeft(ALIGN_PWM); }
-      else                { pivotRight(ALIGN_PWM); }
-      delay(ALIGN_DURATION_MS);
-      stopMotors();
-      delay(100);
-    } else if (isUTurn) {
-      BTSerial.println("--- U-Turn: skipping align ---");
+      if (dLeft < dRight) pivotLeft(ALIGN_PWM); else pivotRight(ALIGN_PWM);
+      delay(ALIGN_DURATION_MS); stopMotors(); delay(100);
     }
-
-    if (turnLeft) smoothTurnLeft();
-    else          smoothTurnRight();
-
-    stopMotors();
-    delay(100);
+    if (turnLeft) smoothTurnLeft(); else smoothTurnRight();
+    stopMotors(); delay(100);
   }
-  // ---------- STATE 3: No Wall on Left ----------
   else if (leftValid && dLeft > NO_WALL_THRESHOLD) {
-    BTSerial.println("--- No left wall. Clearing corner... ---");
+    BTSerial.println("--- No left wall ---");
     moveForwardDistance(CORNER_CLEARANCE_CM, BASE_PWM_STRAIGHT);
-    
-    BTSerial.println("--- Corner cleared. Initiating left turn. ---");
-    stopMotors();
-    delay(10);
-    smoothTurnLeft();
-    stopMotors();
-    delay(150);
+    stopMotors(); delay(10); smoothTurnLeft(); stopMotors(); delay(150);
   }
-  // ---------- STATE 4: Path Clear (Follow Wall) ----------
   else {
     int leftSpeed, rightSpeed;
-
     if (leftValid && rightValid && dLeft < WALL_DETECT_RANGE && dRight < WALL_DETECT_RANGE) {
-      int error = (int)(dLeft - dRight);
-      int correction = (int)(Kp * error);
-      correction = constrain(correction, -MAX_CORRECTION, MAX_CORRECTION);
-      leftSpeed  = constrain(BASE_PWM_STRAIGHT - correction, 0, 100);
-      rightSpeed = constrain(BASE_PWM_STRAIGHT + correction, 0, 100);
-      BTSerial.print("Dual Wall Follow | Error: "); BTSerial.println(error);
-    }
-    else if (leftValid && dLeft < 10) {
-      int targetDist = 6;
-      int error = (int)(dLeft - targetDist);
-      int correction = (int)(Kp * error);
-      correction = constrain(correction, -MAX_CORRECTION, MAX_CORRECTION);
-      leftSpeed  = constrain(BASE_PWM_STRAIGHT + correction, 0, 100);
-      rightSpeed = constrain(BASE_PWM_STRAIGHT - correction, 0, 100);
-      BTSerial.print("Left Wall Follow | Error: "); BTSerial.println(error);
-    }
-    else if (rightValid && dRight < 10) {
-      int targetDist = 6;
-      int error = (int)(targetDist - dRight);
-      int correction = (int)(Kp_Wall * error);
-      correction = constrain(correction, -MAX_CORRECTION, MAX_CORRECTION);
-      leftSpeed  = constrain(BASE_PWM_STRAIGHT - correction, 0, 100);
-      rightSpeed = constrain(BASE_PWM_STRAIGHT + correction, 0, 100);
-      BTSerial.print("Right Wall Follow | Error: "); BTSerial.println(error);
-    }
-    else {
-      leftSpeed = BASE_PWM_STRAIGHT;
-      rightSpeed = BASE_PWM_STRAIGHT;
-      BTSerial.println("No wall detected -> Straight");
+      int err = (int)(dLeft - dRight);
+      int corr = constrain((int)(Kp_Wall * err), -MAX_CORRECTION, MAX_CORRECTION);
+      leftSpeed = constrain(BASE_PWM_STRAIGHT - corr, 0, 100);
+      rightSpeed = constrain(BASE_PWM_STRAIGHT + corr, 0, 100);
+    } else if (leftValid && dLeft < 10) {
+      int err = (int)(dLeft - 6);
+      int corr = constrain((int)(Kp_Wall * err), -MAX_CORRECTION, MAX_CORRECTION);
+      leftSpeed = constrain(BASE_PWM_STRAIGHT + corr, 0, 100);
+      rightSpeed = constrain(BASE_PWM_STRAIGHT - corr, 0, 100);
+    } else if (rightValid && dRight < 10) {
+      int err = (int)(6 - dRight);
+      int corr = constrain((int)(Kp_Wall * err), -MAX_CORRECTION, MAX_CORRECTION);
+      leftSpeed = constrain(BASE_PWM_STRAIGHT - corr, 0, 100);
+      rightSpeed = constrain(BASE_PWM_STRAIGHT + corr, 0, 100);
+    } else {
+      leftSpeed = BASE_PWM_STRAIGHT; rightSpeed = BASE_PWM_STRAIGHT;
     }
     moveForward(rightSpeed, leftSpeed);
   }
-
   delay(10);
 }
 
-// ===============================================================
-//             NEW: Encoder-Based Forward Movement
-// ===============================================================
-void moveForwardDistance(int distance_cm, int pwmVal) {
-  // Calculate target encoder counts
-  const float wheelCircumference = PI * WHEEL_DIAMETER_CM;
-  const long targetCounts = (long)(((float)distance_cm / wheelCircumference) * countsPerRev);
-
-  BTSerial.print("Moving forward ");
-  BTSerial.print(distance_cm);
-  BTSerial.print("cm (");
-  BTSerial.print(targetCounts);
-  BTSerial.println(" counts)");
-
-  // Reset encoders safely
-  noInterrupts();
-  encoderCountL = 0;
-  encoderCountR = 0;
-  interrupts();
-
-  moveForward(pwmVal, pwmVal);
-
-  // Wait until the average distance of both wheels is met
-  while (true) {
-    noInterrupts();
-    long currentL = encoderCountL;
-    long currentR = encoderCountR;
-    interrupts();
-    
-    if ((absl(currentL) + absl(currentR)) / 2 >= targetCounts) {
-      break;
-    }
-    delay(10);
-  }
-
-  stopMotors();
-  BTSerial.println("Target distance reached.");
-}
-
-
-// ===============================================================
-//             180 Degree Encoder-Based Pivot
-// ===============================================================
-void pivot180(int pwmVal) {
-  const float wheelCircumference = PI * WHEEL_DIAMETER_CM;
-  const float turnDistance = PI * (WHEEL_BASE_CM / 2.0f);
-  const long targetCounts = (long)((turnDistance / wheelCircumference) * countsPerRev);
-
-  BTSerial.print("Target Counts for 180 pivot: "); BTSerial.println(targetCounts);
-
-  encoderCountL = 0;
-  encoderCountR = 0;
-
-  pivotRight(pwmVal);
-
-  while(absl(encoderCountL) < targetCounts || absl(encoderCountR) < targetCounts) {
-    if (absl(encoderCountL) >= targetCounts) { stopLeft(); }
-    if (absl(encoderCountR) >= targetCounts) { stopRight(); }
-    delay(5);
-  }
-  
-  stopMotors();
-  BTSerial.println("180 turn complete.");
-}
-
-
-// ===============================================================
-//                  TURNING (Arc with sync + stop-on-reach)
-// ===============================================================
-void pivotTurn90(bool leftTurn, int pwmOuterMax) {
-  const long TICKS_90_DEG = 560;   
-  const int pwmMin = 40;
-
-  int pwm = constrain(pwmOuterMax, pwmMin, 255);
-
-  // Reset encoders
-  encoderCountL = 0;
-  encoderCountR = 0;
-
-  // --- Motor commands for pivot ---
-  if (leftTurn) {
-    // Left turn: left wheel backward, right wheel forward
-    analogWrite(L_RPWM, 0);  analogWrite(L_LPWM, 0);
-    analogWrite(R_RPWM, pwm);    analogWrite(R_LPWM, 0);
-  } else {
-    // Right turn: right wheel backward, left wheel forward
-    analogWrite(L_RPWM, 0);    analogWrite(L_LPWM, pwm);
-    analogWrite(R_RPWM, 0);  analogWrite(R_LPWM, 0);
-  }
-
-  // --- Run until encoder reaches tick target ---
-  while (true) {
-    long aL = absl(encoderCountL);
-    long aR = absl(encoderCountR);
-
-    if (aL >= TICKS_90_DEG || aR >= TICKS_90_DEG) {
-      break;
-    }
-    delay(5);
-  }
-
-  // Stop both wheels
-  stopLeft();
-  stopRight();
-}
-
-void smoothTurnLeft()  { pivotTurn90(true, TURN_PWM); }
-void smoothTurnRight() { pivotTurn90(false, TURN_PWM); }
-
-// ===============================================================
-//                  HELPERS
-// ===============================================================
-
-void moveForward(int pwmValR, int pwmValL) {
-  analogWrite(R_RPWM, pwmValR); analogWrite(R_LPWM, 0);
-  analogWrite(L_RPWM, 0);       analogWrite(L_LPWM, pwmValL);
-}
-
-void moveBackward(int pwmVal) {
-  analogWrite(R_RPWM, 0);       analogWrite(R_LPWM, pwmVal);
-  analogWrite(L_RPWM, pwmVal);  analogWrite(L_LPWM, 0);
-}
-
-void pivotLeft(int pwmVal) {
-  analogWrite(R_RPWM, pwmVal); analogWrite(R_LPWM, 0);
-  analogWrite(L_RPWM, pwmVal); analogWrite(L_LPWM, 0);
-}
-
-void pivotRight(int pwmVal) {
-  analogWrite(L_RPWM, 0);      analogWrite(L_LPWM, pwmVal);
-  analogWrite(R_RPWM, 0);      analogWrite(R_LPWM, pwmVal);
-}
-
-long readUltrasonic(int trigPin, int echoPin) {
-  digitalWrite(trigPin, LOW);  delayMicroseconds(2);
-  digitalWrite(trigPin, HIGH); delayMicroseconds(10);
-  digitalWrite(trigPin, LOW);
-  long duration = pulseIn(echoPin, HIGH, 25000);
-  if (duration == 0) return -1;
-  long distance = duration * 0.034 / 2;
-  return distance;
-}
-
-void countEncoderL() {
-  int A = digitalRead(L_ENC_A);
-  int B = digitalRead(L_ENC_B);
-  if (A == B) { encoderCountL++; }
-  else        { encoderCountL--; }
-}
-
-void countEncoderR() {
-  int A = digitalRead(R_ENC_A);
-  int B = digitalRead(R_ENC_B);
-  if (A == B) { encoderCountR--; } 
-  else        { encoderCountR++;}
-}
-
-// ===============================================================
-//                  Function Definitions for Line Following
-// ===============================================================
-
+// ==================== Line Following Logic ====================
 void lineFollowingMode() {
   readSensors();
-
-  // 1) If we see a strong corner on one side and center is not on line, snap pivot
   if (strongLeftFeature() && !centerOnLine()) {
-    brake(BRAKE_MS);
-    pivotLeftUntilCenter();
-    brake(BRAKE_MS);
+    brake(BRAKE_MS); pivotLeftUntilCenter(); brake(BRAKE_MS);
   } 
   else if (strongRightFeature() && !centerOnLine()) {
-    brake(BRAKE_MS);
-    pivotRightUntilCenter();
-    brake(BRAKE_MS);
+    brake(BRAKE_MS); pivotRightUntilCenter(); brake(BRAKE_MS);
   } 
   else {
-    // 2) Normal PID tracking (with smooth recovery when line is momentarily lost)
-    if (!anyOnLine()) {
-      searchWhenLost();
-      return;
-    }
-
+    if (!anyOnLine()) { searchWhenLost(); return; }
     error = getLineError();
     integral += error;
     derivative = error - lastError;
     correction = (Kp * error) + (Ki * integral) + (Kd * derivative);
     lastError = error;
-
     int leftSpeed  = constrain((int)(baseSpeed + correction),  0, maxPWM);
     int rightSpeed = constrain((int)(baseSpeed - correction), 0, maxPWM);
-
     setMotorSpeeds(leftSpeed, rightSpeed);
   }
-
   delay(5);
 }
 
-// ====================== Sensor and Motor Functions ======================
+// ==================== Motion Functions ====================
+void moveForwardDistance(int distance_cm, int pwmVal) {
+  const long targetCounts = (long)(((float)distance_cm / (PI * WHEEL_DIAMETER_CM)) * countsPerRev);
+  BTSerial.print("Moving FWD: "); BTSerial.println(distance_cm);
+  noInterrupts(); encoderCountL = 0; encoderCountR = 0; interrupts();
+  moveForward(pwmVal, pwmVal);
+  while (true) {
+    updateOdometry();
+    noInterrupts(); long cL = encoderCountL; long cR = encoderCountR; interrupts();
+    if ((absl(cL) + absl(cR)) / 2 >= targetCounts) break;
+    delay(10);
+  }
+  stopMotors();
+}
+
+void pivot180(int pwmVal) {
+  const long targetCounts = (long)((PI * (WHEEL_BASE_CM / 2.0f) / (PI * WHEEL_DIAMETER_CM)) * countsPerRev);
+  BTSerial.println("Pivot 180");
+  encoderCountL = 0; encoderCountR = 0;
+  pivotRight(pwmVal);
+  while(absl(encoderCountL) < targetCounts || absl(encoderCountR) < targetCounts) {
+    updateOdometry();
+    if (absl(encoderCountL) >= targetCounts) stopLeft();
+    if (absl(encoderCountR) >= targetCounts) stopRight();
+    delay(5);
+  }
+  stopMotors();
+}
+
+void pivotTurn90(bool leftTurn, int pwmOuterMax) {
+  const long TICKS_90_DEG = 560; 
+  encoderCountL = 0; encoderCountR = 0;
+  if (leftTurn) { analogWrite(L_RPWM, 0); analogWrite(L_LPWM, 0); analogWrite(R_RPWM, pwmOuterMax); analogWrite(R_LPWM, 0); }
+  else { analogWrite(L_RPWM, 0); analogWrite(L_LPWM, pwmOuterMax); analogWrite(R_RPWM, 0); analogWrite(R_LPWM, 0); }
+  while (true) {
+    updateOdometry();
+    if (absl(encoderCountL) >= TICKS_90_DEG || absl(encoderCountR) >= TICKS_90_DEG) break;
+    delay(5);
+  }
+  stopMotors();
+}
+
+void smoothTurnLeft()  { pivotTurn90(true, TURN_PWM); }
+void smoothTurnRight() { pivotTurn90(false, TURN_PWM); }
+
+void pivotLeft90UntilLine(int pwmVal) {
+  const long targetCounts = (long)(((PI * WHEEL_BASE_CM / 4.0f) / (PI * WHEEL_DIAMETER_CM)) * countsPerRev);
+  noInterrupts(); encoderCountL = 0; encoderCountR = 0; interrupts();
+  pivotLeft(pwmVal);
+  while (absl(encoderCountL) < targetCounts || absl(encoderCountR) < targetCounts) {
+    updateOdometry();
+    readSensors();
+    if (anyOnLine()) break;
+    if (absl(encoderCountL) >= targetCounts) stopLeft();
+    if (absl(encoderCountR) >= targetCounts) stopRight();
+    delay(5);
+  }
+  stopMotors();
+}
+
+void pivotRight90UntilLine(int pwmVal) {
+  const long targetCounts = (long)(((PI * WHEEL_BASE_CM / 4.0f) / (PI * WHEEL_DIAMETER_CM)) * countsPerRev);
+  noInterrupts(); encoderCountL = 0; encoderCountR = 0; interrupts();
+  pivotRight(pwmVal);
+  while (absl(encoderCountL) < targetCounts || absl(encoderCountR) < targetCounts) {
+    updateOdometry();
+    readSensors();
+    if (anyOnLine()) break;
+    if (absl(encoderCountL) >= targetCounts) stopLeft();
+    if (absl(encoderCountR) >= targetCounts) stopRight();
+    delay(5);
+  }
+  stopMotors();
+}
+
+void searchWhenLost() {
+  BTSerial.println("Lost Line! Searching...");
+  pivotLeft90UntilLine(50);
+  pivotRight90UntilLine(50);
+  pivotRight90UntilLine(50);
+}
+
+// ==================== Basic Hardware Helpers ====================
+void moveForward(int pwmValR, int pwmValL) { analogWrite(R_RPWM, pwmValR); analogWrite(R_LPWM, 0); analogWrite(L_RPWM, 0); analogWrite(L_LPWM, pwmValL); }
+void pivotLeft(int pwmVal) { analogWrite(R_RPWM, pwmVal); analogWrite(R_LPWM, 0); analogWrite(L_RPWM, pwmVal); analogWrite(L_LPWM, 0); }
+void pivotRight(int pwmVal) { analogWrite(L_RPWM, 0); analogWrite(L_LPWM, pwmVal); analogWrite(R_RPWM, 0); analogWrite(R_LPWM, pwmVal); }
+void stopMotors() { stopLeft(); stopRight(); }
+void brake(uint16_t ms) { stopMotors(); delay(ms); }
+
+long readUltrasonic(int trigPin, int echoPin) {
+  digitalWrite(trigPin, LOW); delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH); delayMicroseconds(10); digitalWrite(trigPin, LOW);
+  long dur = pulseIn(echoPin, HIGH, 25000);
+  return (dur == 0) ? -1 : dur * 0.034 / 2;
+}
+
+void countEncoderL() { if (digitalRead(L_ENC_A) == digitalRead(L_ENC_B)) encoderCountL++; else encoderCountL--; }
+void countEncoderR() { if (digitalRead(R_ENC_A) == digitalRead(R_ENC_B)) encoderCountR--; else encoderCountR++; }
+
 void readSensors() {
   sensorBits = 0;
   for (int i = 0; i < 8; i++) {
     int raw = digitalRead(sensorPins[i]);
-    bool isBlack = BLACK_IS_HIGH ? (raw == HIGH) : (raw == LOW);
-    sensorVal[i] = isBlack ? 1 : 0;
-    if (isBlack) sensorBits |= (1u << i);
+    sensorVal[i] = (BLACK_IS_HIGH ? (raw == HIGH) : (raw == LOW)) ? 1 : 0;
+    if (sensorVal[i]) sensorBits |= (1u << i);
   }
 }
 
 float getLineError() {
   static const float weight[8] = {-3.5, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5, 3.5};
   float sumW = 0.0f, sum = 0.0f;
-
-  for (int i = 0; i < 8; i++) {
-    if (sensorVal[i]) { sumW += weight[i]; sum += 1.0f; }
-  }
-
-  if (sum == 0.0f) return lastError;
-  return sumW / sum;
+  for (int i = 0; i < 8; i++) { if (sensorVal[i]) { sumW += weight[i]; sum += 1.0f; } }
+  return (sum == 0.0f) ? lastError : sumW / sum;
 }
 
 void setMotorSpeeds(int leftSpeed, int rightSpeed) {
-  analogWrite(R_RPWM, rightSpeed);
-  analogWrite(R_LPWM, 0);
-  analogWrite(L_RPWM, 0);
-  analogWrite(L_LPWM, leftSpeed);
+  analogWrite(R_RPWM, rightSpeed); analogWrite(R_LPWM, 0);
+  analogWrite(L_RPWM, 0); analogWrite(L_LPWM, leftSpeed);
 }
 
-void stopMotors() {
-  stopLeft(); 
-  stopRight();
-}
-
-// ====================== Corner / Recovery Helpers ======================
 bool anyOnLine() { return sensorBits != 0; }
 bool centerOnLine() { return sensorVal[CENTER_IDX[0]] || sensorVal[CENTER_IDX[1]]; }
-
-uint8_t countBlk(const uint8_t idxs[], uint8_t n) {
-  uint8_t c = 0;
-  for (uint8_t k = 0; k < n; k++) c += sensorVal[idxs[k]] ? 1 : 0;
-  return c;
-}
-
-bool strongLeftFeature() {
-  uint8_t L = countBlk(LEFT_IDX, 3);
-  uint8_t R = countBlk(RIGHT_IDX, 3);
-  return (L >= LEFT_STRONG_MIN) && (R <= 1);
-}
-
-bool strongRightFeature() {
-  uint8_t L = countBlk(LEFT_IDX, 3);
-  uint8_t R = countBlk(RIGHT_IDX, 3);
-  return (R >= RIGHT_STRONG_MIN) && (L <= 1);
-}
-
-void brake(uint16_t ms) { stopMotors(); delay(ms); }
+uint8_t countBlk(const uint8_t idxs[], uint8_t n) { uint8_t c = 0; for (uint8_t k = 0; k < n; k++) c += sensorVal[idxs[k]]; return c; }
+bool strongLeftFeature() { return (countBlk(LEFT_IDX, 3) >= LEFT_STRONG_MIN && countBlk(RIGHT_IDX, 3) <= 1); }
+bool strongRightFeature() { return (countBlk(RIGHT_IDX, 3) >= RIGHT_STRONG_MIN && countBlk(LEFT_IDX, 3) <= 1); }
 
 void pivotLeftUntilCenter() {
   unsigned long t0 = millis();
   while (millis() - t0 < PIVOT_TIMEOUT_MS) {
-    analogWrite(R_RPWM, TURN_PWM_LINE);
-    analogWrite(R_LPWM, 0);
-    analogWrite(L_RPWM, TURN_PWM_LINE);
-    analogWrite(L_LPWM, 0);
-    readSensors();
-    if (centerOnLine()) break;
-    delay(4);
+    updateOdometry(); analogWrite(R_RPWM, TURN_PWM_LINE); analogWrite(R_LPWM, 0); analogWrite(L_RPWM, TURN_PWM_LINE); analogWrite(L_LPWM, 0);
+    readSensors(); if (centerOnLine()) break; delay(4);
   }
 }
-
 void pivotRightUntilCenter() {
   unsigned long t0 = millis();
   while (millis() - t0 < PIVOT_TIMEOUT_MS) {
-    analogWrite(R_RPWM, 0);
-    analogWrite(R_LPWM, TURN_PWM_LINE);
-    analogWrite(L_RPWM, 0);
-    analogWrite(L_LPWM, TURN_PWM_LINE);
-    readSensors();
-    if (centerOnLine()) break;
-    delay(4);
+    updateOdometry(); analogWrite(R_RPWM, 0); analogWrite(R_LPWM, TURN_PWM_LINE); analogWrite(L_RPWM, 0); analogWrite(L_LPWM, TURN_PWM_LINE);
+    readSensors(); if (centerOnLine()) break; delay(4);
   }
-}
-
-
-
-void pivotLeft90UntilLine(int pwmVal) {
-  // Calculate the target encoder counts for a full 90-degree turn
-  const float wheelCircumference = PI * WHEEL_DIAMETER_CM;
-  const float turnDistance = (PI * WHEEL_BASE_CM) / 4.0f; // 1/4 of the full circle circumference
-  const long targetCounts = (long)((turnDistance / wheelCircumference) * countsPerRev);
-
-  BTSerial.println("Pivoting left (max 90 deg) until line is found...");
-
-  // Reset encoders safely
-  noInterrupts();
-  encoderCountL = 0;
-  encoderCountR = 0;
-  interrupts();
-
-  // Start pivoting left
-  pivotLeft(pwmVal);
-
-  bool lineWasFound = false;
-
-  // Loop until EITHER the 90-degree turn is complete OR a line is detected
-  while (absl(encoderCountL) < targetCounts || absl(encoderCountR) < targetCounts) {
-    
-    // Check the line sensors in every loop iteration
-    readSensors();
-    if (anyOnLine()) {
-      lineWasFound = true;
-      break; // Exit the loop immediately if a line is found
-    }
-
-    // If one wheel reaches the target count first, stop it to prevent overshooting
-    if (absl(encoderCountL) >= targetCounts) { stopLeft(); }
-    if (absl(encoderCountR) >= targetCounts) { stopRight(); }
-    
-    delay(5); // Small delay to allow motors to run and not overwhelm the CPU
-  }
-
-  stopMotors(); // Stop all movement
-
-  if (lineWasFound) {
-    BTSerial.println("Line found! Stopping pivot.");
-  } else {
-    BTSerial.println("90-degree pivot completed, line was not found.");
-  }
-}
-
-
-/**
- * @brief Pivots the robot up to 90 degrees to the right, stopping early
- *        if a line is detected.
- * 
- * @param pwmVal The motor speed (0-255) to use for the pivot.
- */
-void pivotRight90UntilLine(int pwmVal) {
-  // Calculation is identical to the left pivot
-  const float wheelCircumference = PI * WHEEL_DIAMETER_CM;
-  const float turnDistance = (PI * WHEEL_BASE_CM) / 4.0f;
-  const long targetCounts = (long)((turnDistance / wheelCircumference) * countsPerRev);
-
-  BTSerial.println("Pivoting right (max 90 deg) until line is found...");
-
-  // Reset encoders safely
-  noInterrupts();
-  encoderCountL = 0;
-  encoderCountR = 0;
-  interrupts();
-
-  // Start pivoting right
-  pivotRight(pwmVal);
-
-  bool lineWasFound = false;
-
-  // Loop until EITHER the 90-degree turn is complete OR a line is detected
-  while (absl(encoderCountL) < targetCounts || absl(encoderCountR) < targetCounts) {
-    
-    // Check the line sensors in every loop iteration
-    readSensors();
-    if (anyOnLine()) {
-      lineWasFound = true;
-      break; // Exit the loop immediately if a line is found
-    }
-
-    // If one wheel reaches the target count first, stop it
-    if (absl(encoderCountL) >= targetCounts) { stopLeft(); }
-    if (absl(encoderCountR) >= targetCounts) { stopRight(); }
-    
-    delay(5);
-  }
-
-  stopMotors();
-
-  if (lineWasFound) {
-    BTSerial.println("Line found! Stopping pivot.");
-  } else {
-    BTSerial.println("90-degree pivot completed, line was not found.");
-  }
-}
-
-void searchWhenLost() {
-  pivotLeft90UntilLine(50);
-  pivotRight90UntilLine(50);
-  pivotRight90UntilLine(50);
 }
