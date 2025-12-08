@@ -52,6 +52,9 @@ void lineFollowingMode();
 #define R_ENC_A 20
 #define R_ENC_B 21
 
+#define SEARCH_MODE 33
+#define RIGHT_MODE 38
+#define LEFT_MODE 39
 
 // ==================== Robot Physical Constants ====================
 const float WHEEL_DIAMETER_CM = 6.5f;
@@ -154,6 +157,10 @@ void setup() {
   pinMode(R_ENC_A, INPUT_PULLUP); pinMode(R_ENC_B, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(L_ENC_A), countEncoderL, CHANGE);
   attachInterrupt(digitalPinToInterrupt(R_ENC_A), countEncoderR, CHANGE);
+
+  pinMode(SEARCH_MODE, INPUT_PULLUP);
+  pinMode(RIGHT_MODE, INPUT_PULLUP);
+  pinMode(LEFT_MODE, INPUT_PULLUP);
 
   // Serial.println("Robot Initialized...");
   // Serial3.println("BT: Robot Initialized...");
@@ -349,9 +356,8 @@ void moveForwardDistance(int distance_cm, int pwmVal) {
 //             180 Degree Encoder-Based Pivot
 // ===============================================================
 void pivot180(int pwmVal) {
-  const float wheelCircumference = PI * WHEEL_DIAMETER_CM;
-  const float turnDistance = PI * (WHEEL_BASE_CM / 2.0f);
-  const long targetCounts = (long)((turnDistance / wheelCircumference) * countsPerRev);
+  
+  const int targetCounts = 550; // Approximate value for 180-degree pivot
 
   // Serial.print("Target Counts for 180 pivot: "); Serial.println(targetCounts);
   // Serial3.println("BT: Pivoting 180");
@@ -376,7 +382,7 @@ void pivot180(int pwmVal) {
 //                  TURNING (Arc with sync + stop-on-reach)
 // ===============================================================
 void pivotTurn90(bool leftTurn, int pwmOuterMax) {
-  const long TICKS_90_DEG = 560;   
+  const int TICKS_90_DEG = 560;   
   const int pwmMin = 40;
 
   int pwm = constrain(pwmOuterMax, pwmMin, 255);
