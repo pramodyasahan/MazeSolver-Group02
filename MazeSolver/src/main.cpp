@@ -62,19 +62,19 @@ const int countsPerRev      = pulsesPerMotorRev * gearRatio * 2;
 
 // ==================== Turning Configuration ====================
 const int   TURN_PWM       = 50;
-const float TURN_RADIUS_CM = 10.0f;
+const float TURN_RADIUS_CM = 11.0f;
 const int   PIVOT_180_PWM  = 55;
 
 // ==================== Navigation Thresholds ====================
-const int OBSTACLE_THRESHOLD      = 12;
-const int OPEN_SPACE_THRESHOLD_CM = 1000;
-const int DEAD_END_THRESHOLD      = 12;
+const int OBSTACLE_THRESHOLD      = 8;
+const int OPEN_SPACE_THRESHOLD_CM = 40;
+const int DEAD_END_THRESHOLD      = 8;
 const int NO_WALL_THRESHOLD       = 25;
-const int CORNER_CLEARANCE_CM     = 6;
+const int CORNER_CLEARANCE_CM     = 8;
 
 // ==================== Wall Following ====================
 const int   BASE_PWM_STRAIGHT = 60;
-const float Kp_Wall                = 4.0f;
+const float Kp_Wall                = 3.5f;
 const int   MAX_CORRECTION    = 20;
 const int   WALL_DETECT_RANGE = 20;
 
@@ -133,7 +133,11 @@ bool wallMode = true;
 
 // ==================== Setup ====================
 void setup() {
+  // Initialize USB Serial
   Serial.begin(9600);
+
+  // Initialize Bluetooth Serial (Pins 14 TX, 15 RX on Mega)
+  Serial3.begin(9600);
 
   pinMode(TRIG_FRONT, OUTPUT); pinMode(ECHO_FRONT, INPUT);
   pinMode(TRIG_LEFT,  OUTPUT); pinMode(ECHO_LEFT,  INPUT);
@@ -151,7 +155,8 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(L_ENC_A), countEncoderL, CHANGE);
   attachInterrupt(digitalPinToInterrupt(R_ENC_A), countEncoderR, CHANGE);
 
-  Serial.println("Robot Initialized...");
+  // Serial.println("Robot Initialized...");
+  // Serial3.println("BT: Robot Initialized...");
 }
 
 // ===============================================================
@@ -170,7 +175,8 @@ void loop() {
     }
 
     if (whiteCount >= 7) {  // all white detected
-      Serial.println("All white detected! Switching to LINE FOLLOWING MODE...");
+      // Serial.println("All white detected! Switching to LINE FOLLOWING MODE...");
+      // Serial3.println("BT: Switching to LINE MODE");
 
       stopMotors();
       delay(1000);
@@ -199,13 +205,19 @@ void wallFollowingMode() {
   Serial.print("F:"); Serial.print(dFront);
   Serial.print(" L:"); Serial.print(dLeft);
   Serial.print(" R:"); Serial.println(dRight);
+  
+  // Mirror to Bluetooth
+  Serial3.print("F:"); Serial3.print(dFront);
+  Serial3.print(" L:"); Serial3.print(dLeft);
+  Serial3.print(" R:"); Serial3.println(dRight);
 
   // ---------- STATE 1: Dead End ----------
   if (frontValid && dFront < DEAD_END_THRESHOLD &&
       leftValid  && dLeft  < DEAD_END_THRESHOLD &&
       rightValid && dRight < DEAD_END_THRESHOLD)
   {
-      Serial.println("--- DEAD END: Executing 180 turn ---");
+      // Serial.println("--- DEAD END: Executing 180 turn ---");
+      // Serial3.println("BT: DEAD END -> 180 Turn");
       stopMotors();
       delay(100);
       pivot180(PIVOT_180_PWM);
@@ -224,13 +236,15 @@ void wallFollowingMode() {
 
     if (!isUTurn && leftValid && rightValid && (abs(dLeft - dRight) > ALIGN_TOLERANCE_CM)) {
       Serial.println("--- Aligning ---");
+      Serial3.println("BT: Aligning");
       if (dLeft < dRight) { pivotLeft(ALIGN_PWM); }
       else                { pivotRight(ALIGN_PWM); }
       delay(ALIGN_DURATION_MS);
       stopMotors();
       delay(100);
     } else if (isUTurn) {
-      Serial.println("--- U-Turn: skipping align ---");
+      // Serial.println("--- U-Turn: skipping align ---");
+      // Serial3.println("BT: U-Turn");
     }
 
     if (turnLeft) smoothTurnLeft();
@@ -241,10 +255,12 @@ void wallFollowingMode() {
   }
   // ---------- STATE 3: No Wall on Left ----------
   else if (leftValid && dLeft > NO_WALL_THRESHOLD) {
-    Serial.println("--- No left wall. Clearing corner... ---");
+    // Serial.println("--- No left wall. Clearing corner... ---");
+    // Serial3.println("BT: No Left Wall -> Clear Corner");
     moveForwardDistance(CORNER_CLEARANCE_CM, BASE_PWM_STRAIGHT);
     
-    Serial.println("--- Corner cleared. Initiating left turn. ---");
+    // Serial.println("--- Corner cleared. Initiating left turn. ---");
+    // Serial3.println("BT: Turning Left");
     stopMotors();
     delay(10);
     smoothTurnLeft();
@@ -257,20 +273,20 @@ void wallFollowingMode() {
 
     if (leftValid && rightValid && dLeft < WALL_DETECT_RANGE && dRight < WALL_DETECT_RANGE) {
       int error = (int)(dLeft - dRight);
-      int correction = (int)(Kp * error);
+      int correction = (int)(Kp_Wall * error);
       correction = constrain(correction, -MAX_CORRECTION, MAX_CORRECTION);
       leftSpeed  = constrain(BASE_PWM_STRAIGHT - correction, 0, 100);
       rightSpeed = constrain(BASE_PWM_STRAIGHT + correction, 0, 100);
-      Serial.print("Dual Wall Follow | Error: "); Serial.println(error);
+      // Serial.print("Dual Wall Follow | Error: "); Serial.println(error);
     }
     else if (leftValid && dLeft < 10) {
       int targetDist = 6;
       int error = (int)(dLeft - targetDist);
-      int correction = (int)(Kp * error);
+      int correction = (int)(Kp_Wall * error);
       correction = constrain(correction, -MAX_CORRECTION, MAX_CORRECTION);
       leftSpeed  = constrain(BASE_PWM_STRAIGHT + correction, 0, 100);
       rightSpeed = constrain(BASE_PWM_STRAIGHT - correction, 0, 100);
-      Serial.print("Left Wall Follow | Error: "); Serial.println(error);
+      // Serial.print("Left Wall Follow | Error: "); Serial.println(error);
     }
     else if (rightValid && dRight < 10) {
       int targetDist = 6;
@@ -279,12 +295,12 @@ void wallFollowingMode() {
       correction = constrain(correction, -MAX_CORRECTION, MAX_CORRECTION);
       leftSpeed  = constrain(BASE_PWM_STRAIGHT - correction, 0, 100);
       rightSpeed = constrain(BASE_PWM_STRAIGHT + correction, 0, 100);
-      Serial.print("Right Wall Follow | Error: "); Serial.println(error);
+      // Serial.print("Right Wall Follow | Error: "); Serial.println(error);
     }
     else {
       leftSpeed = BASE_PWM_STRAIGHT;
       rightSpeed = BASE_PWM_STRAIGHT;
-      Serial.println("No wall detected -> Straight");
+      // Serial.println("No wall detected -> Straight");
     }
     moveForward(rightSpeed, leftSpeed);
   }
@@ -300,11 +316,8 @@ void moveForwardDistance(int distance_cm, int pwmVal) {
   const float wheelCircumference = PI * WHEEL_DIAMETER_CM;
   const long targetCounts = (long)(((float)distance_cm / wheelCircumference) * countsPerRev);
 
-  Serial.print("Moving forward ");
-  Serial.print(distance_cm);
-  Serial.print("cm (");
-  Serial.print(targetCounts);
-  Serial.println(" counts)");
+  // Serial.print("Moving forward "); Serial.print(distance_cm);
+  // Serial3.print("BT: Fwd "); Serial3.println(distance_cm);
 
   // Reset encoders safely
   noInterrupts();
@@ -340,7 +353,8 @@ void pivot180(int pwmVal) {
   const float turnDistance = PI * (WHEEL_BASE_CM / 2.0f);
   const long targetCounts = (long)((turnDistance / wheelCircumference) * countsPerRev);
 
-  Serial.print("Target Counts for 180 pivot: "); Serial.println(targetCounts);
+  // Serial.print("Target Counts for 180 pivot: "); Serial.println(targetCounts);
+  // Serial3.println("BT: Pivoting 180");
 
   encoderCountL = 0;
   encoderCountR = 0;
@@ -354,95 +368,52 @@ void pivot180(int pwmVal) {
   }
   
   stopMotors();
-  Serial.println("180 turn complete.");
+  // Serial.println("180 turn complete.");
 }
 
 
 // ===============================================================
 //                  TURNING (Arc with sync + stop-on-reach)
 // ===============================================================
-static void smoothTurnArc90(bool leftTurn, float Rc_cm, int pwmOuterMax) {
-  const float B = WHEEL_BASE_CM;
-  const float R_inner = Rc_cm - (B / 2.0f);
-  const float R_outer = Rc_cm + (B / 2.0f);
+void pivotTurn90(bool leftTurn, int pwmOuterMax) {
+  const long TICKS_90_DEG = 560;   
+  const int pwmMin = 40;
 
-  if (R_inner <= 0.5f) {
-    Serial.println("Arc too tight -> pivot");
-    if (leftTurn) pivotLeft(pwmOuterMax);
-    else          pivotRight(pwmOuterMax);
-    delay(220);
-    stopRight(); stopLeft();
-    return;
-  }
+  int pwm = constrain(pwmOuterMax, pwmMin, 255);
 
-  const float wheelC  = PI * WHEEL_DIAMETER_CM;
-  const float s_inner = (PI * R_inner) / 2.0f;
-  const float s_outer = (PI * R_outer) / 2.0f;
-
-  const long cnt_inner = (long)((s_inner / wheelC) * countsPerRev);
-  const long cnt_outer = (long)((s_outer / wheelC) * countsPerRev);
-
-  int pwmOuter = pwmOuterMax;
-  int pwmInner = (int)((float)pwmOuterMax * (s_inner / s_outer));
-  const int pwmMin = 38;
-  pwmInner = constrain(pwmInner, pwmMin, pwmOuter);
-
+  // Reset encoders
   encoderCountL = 0;
   encoderCountR = 0;
 
+  // --- Motor commands for pivot ---
   if (leftTurn) {
-    analogWrite(L_RPWM, 0);        analogWrite(L_LPWM, pwmInner);
-    analogWrite(R_RPWM, pwmOuter); analogWrite(R_LPWM, 0);
+    // Left turn: left wheel backward, right wheel forward
+    analogWrite(L_RPWM, 0);  analogWrite(L_LPWM, 0);
+    analogWrite(R_RPWM, pwm);    analogWrite(R_LPWM, 0);
   } else {
-    analogWrite(R_RPWM, pwmInner); analogWrite(R_LPWM, 0);
-    analogWrite(L_RPWM, 0);        analogWrite(L_LPWM, pwmOuter);
+    // Right turn: right wheel backward, left wheel forward
+    analogWrite(L_RPWM, 0);    analogWrite(L_LPWM, pwm);
+    analogWrite(R_RPWM, 0);  analogWrite(R_LPWM, 0);
   }
 
-  const int kSync = 2;
-
+  // --- Run until encoder reaches tick target ---
   while (true) {
     long aL = absl(encoderCountL);
     long aR = absl(encoderCountR);
-    long tgtL = leftTurn ? cnt_inner : cnt_outer;
-    long tgtR = leftTurn ? cnt_outer : cnt_inner;
-    bool L_done = (aL >= tgtL);
-    bool R_done = (aR >= tgtR);
-    if (L_done && R_done) break;
-    long remL = (aL >= tgtL) ? 0 : (tgtL - aL);
-    long remR = (aR >= tgtR) ? 0 : (tgtR - aR);
-    long remMax = (remL > remR) ? remL : remR;
-    int baseOuter = pwmOuter;
-    int baseInner = pwmInner;
-    long tgtMax = (tgtL > tgtR) ? tgtL : tgtR;
-    if (remMax < (tgtMax / 4)) {
-      baseOuter = (baseOuter > pwmMin + 10) ? (baseOuter - 10) : pwmMin;
-      baseInner = (baseInner > pwmMin + 10) ? (baseInner - 10) : pwmMin;
+
+    if (aL >= TICKS_90_DEG || aR >= TICKS_90_DEG) {
+      break;
     }
-    int errCounts = (int)(aR - aL);
-    int adj = errCounts * kSync;
-    if (adj > 10) adj = 10;
-    if (adj < -10) adj = -10;
-    if (!L_done) {
-      int pwmL = leftTurn ? (baseInner + adj) : (baseOuter - adj);
-      if (pwmL < pwmMin) pwmL = pwmMin;
-      if (pwmL > 255)    pwmL = 255;
-      analogWrite(L_RPWM, 0);
-      analogWrite(L_LPWM, pwmL);
-    } else { stopLeft(); }
-    if (!R_done) {
-      int pwmR = leftTurn ? (baseOuter - adj) : (baseInner + adj);
-      if (pwmR < pwmMin) pwmR = pwmMin;
-      if (pwmR > 255)    pwmR = 255;
-      analogWrite(R_RPWM, pwmR);
-      analogWrite(R_LPWM, 0);
-    } else { stopRight(); }
     delay(5);
   }
-  stopRight(); stopLeft();
+
+  // Stop both wheels
+  stopLeft();
+  stopRight();
 }
 
-void smoothTurnLeft()  { smoothTurnArc90(true,  TURN_RADIUS_CM, TURN_PWM); }
-void smoothTurnRight() { smoothTurnArc90(false, TURN_RADIUS_CM, TURN_PWM); }
+void smoothTurnLeft()  { pivotTurn90(true, TURN_PWM); }
+void smoothTurnRight() { pivotTurn90(false, TURN_PWM); }
 
 // ===============================================================
 //                  HELPERS
@@ -592,6 +563,7 @@ bool strongRightFeature() {
 void brake(uint16_t ms) { stopMotors(); delay(ms); }
 
 void pivotLeftUntilCenter() {
+  Serial3.println("BT: Pivot Left (Center)");
   unsigned long t0 = millis();
   while (millis() - t0 < PIVOT_TIMEOUT_MS) {
     analogWrite(R_RPWM, TURN_PWM_LINE);
@@ -605,6 +577,7 @@ void pivotLeftUntilCenter() {
 }
 
 void pivotRightUntilCenter() {
+  Serial3.println("BT: Pivot Right (Center)");
   unsigned long t0 = millis();
   while (millis() - t0 < PIVOT_TIMEOUT_MS) {
     analogWrite(R_RPWM, 0);
@@ -626,6 +599,7 @@ void pivotLeft90UntilLine(int pwmVal) {
   const long targetCounts = (long)((turnDistance / wheelCircumference) * countsPerRev);
 
   Serial.println("Pivoting left (max 90 deg) until line is found...");
+  Serial3.println("BT: Search Left");
 
   // Reset encoders safely
   noInterrupts();
@@ -658,9 +632,9 @@ void pivotLeft90UntilLine(int pwmVal) {
   stopMotors(); // Stop all movement
 
   if (lineWasFound) {
-    Serial.println("Line found! Stopping pivot.");
+    // Serial.println("Line found! Stopping pivot.");
   } else {
-    Serial.println("90-degree pivot completed, line was not found.");
+    // Serial.println("90-degree pivot completed, line was not found.");
   }
 }
 
@@ -678,6 +652,7 @@ void pivotRight90UntilLine(int pwmVal) {
   const long targetCounts = (long)((turnDistance / wheelCircumference) * countsPerRev);
 
   Serial.println("Pivoting right (max 90 deg) until line is found...");
+  Serial3.println("BT: Search Right");
 
   // Reset encoders safely
   noInterrupts();
@@ -717,6 +692,7 @@ void pivotRight90UntilLine(int pwmVal) {
 }
 
 void searchWhenLost() {
+  Serial3.println("BT: Lost! Searching...");
   pivotLeft90UntilLine(50);
   pivotRight90UntilLine(50);
   pivotRight90UntilLine(50);
