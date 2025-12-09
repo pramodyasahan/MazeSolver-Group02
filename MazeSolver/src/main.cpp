@@ -25,11 +25,11 @@
 #define R_ENC_A 20
 #define R_ENC_B 21
 
-// Mode Switch Pin
+// Mode Switch Pin (Connect to GND to start Solve)
 #define SEARCH_MODE 33 
 
 // ===================================================================================
-// 2. FUNCTION PROTOTYPES (TELLS COMPILER THESE EXIST)
+// 2. FUNCTION PROTOTYPES
 // ===================================================================================
 void stopMotors(); 
 long readUltrasonic(int trigPin, int echoPin);
@@ -39,23 +39,22 @@ void smoothTurnLeft();
 void smoothTurnRight();
 void moveForward(int pwmValR, int pwmValL);
 void pivotLeft(int pwmVal);
-void pivotRight(int pwmVal); // Prototype needed here!
+void pivotRight(int pwmVal);
 void pivot180(int pwmVal);
 void moveForwardDistance(int distance_cm, int pwmVal);
 
-// Maze Functions
 void mazeMapping();
 void mazeSolve();
 void recordPath(char direction);
 void simplifyPath();
 void keepCentered(); 
+void printPathToBluetooth();
 
-// Helpers
 void pivotTurn90(bool leftTurn, int pwmOuterMax);
 void wallFollowingMode();
 
 // ===================================================================================
-// 3. INLINE HELPERS (NOW SAFE BECAUSE PINS ARE DEFINED)
+// 3. INLINE HELPERS
 // ===================================================================================
 inline void stopRight(){ analogWrite(R_RPWM, 0); analogWrite(R_LPWM, 0); }
 inline void stopLeft() { analogWrite(L_RPWM, 0); analogWrite(L_LPWM, 0); }
@@ -73,14 +72,14 @@ const int   TURN_PWM       = 55;
 const int   PIVOT_180_PWM  = 60;
 const int   BASE_PWM_STRAIGHT = 65;
 
-// Thresholds
+// --- CRITICAL THRESHOLDS ---
 const int OBSTACLE_THRESHOLD      = 8;
 const int FRONT_WALL_TRIGGER      = 15; 
-const int OPEN_SPACE_THRESHOLD_CM = 25; 
+// Reduced to 20cm to ensure side paths are detected reliably
+const int OPEN_SPACE_THRESHOLD_CM = 20; 
 const int INTERSECTION_DELAY      = 200;
 const int WALL_DETECT_RANGE       = 20;
 
-// PID / Correction
 const float Kp_Solve              = 5.0f; 
 const int   MAX_CORRECTION        = 30;   
 const int   TARGET_WALL_DIST      = 7;    
@@ -107,7 +106,7 @@ const uint8_t sensorPins[8] = {22, 23, 24, 25, 26, 27, 28, 29};
 // ===================================================================================
 void setup() {
   Serial.begin(9600);
-  Serial3.begin(9600);
+  Serial3.begin(9600); // Bluetooth
 
   pinMode(TRIG_FRONT, OUTPUT); pinMode(ECHO_FRONT, INPUT);
   pinMode(TRIG_LEFT,  OUTPUT); pinMode(ECHO_LEFT,  INPUT);
@@ -128,6 +127,7 @@ void setup() {
   pinMode(SEARCH_MODE, INPUT_PULLUP); 
 
   Serial.println("Robot Initialized...");
+  Serial3.println("BT: Robot Ready. Starting Mapping...");
 }
 
 // ===================================================================================
@@ -141,16 +141,17 @@ void loop() {
 
     case STATE_FINISHED:
       stopMotors();
-      Serial.println("Mapping Finished. Path:");
-      for(int i=0; i<pathLength; i++) Serial.print(path[i]);
-      Serial.println();
+      // Print the path ONCE when finished
+      printPathToBluetooth();
       currentState = STATE_WAITING_FOR_SWITCH;
       break;
 
     case STATE_WAITING_FOR_SWITCH:
       stopMotors();
+      // Check Pin 33 (Ground it to start solving)
       if (digitalRead(SEARCH_MODE) == LOW) {
         Serial.println("Solving...");
+        Serial3.println("BT: Button Pressed -> SOLVING MODE");
         delay(2000); 
         currentState = STATE_SOLVING;
       }
@@ -163,11 +164,11 @@ void loop() {
 }
 
 // ===================================================================================
-// 7. MAZE LOGIC IMPLEMENTATION
+// 7. MAZE LOGIC 
 // ===================================================================================
 
-// --- MAPPING ---
 void mazeMapping() {
+  // Check Finish
   int whiteCount = 0;
   for (int i = 0; i < 8; i++) if (digitalRead(sensorPins[i]) == LOW) whiteCount++;
   if (whiteCount >= 7) { currentState = STATE_FINISHED; return; }
@@ -185,12 +186,14 @@ void mazeMapping() {
     stopMotors(); delay(100); pivot180(PIVOT_180_PWM); recordPath('B'); return;
   }
 
-  // 2. Left Turn
+  // 2. Left Turn Available
   if (leftOpen) {
     moveForwardDistance(5, BASE_PWM_STRAIGHT); 
     stopMotors(); delay(INTERSECTION_DELAY);
     smoothTurnLeft(); 
+    // Always record 'L' if we turn left, helps with optimization logic
     if (frontOpen || rightOpen) recordPath('L');
+    else if (pathLength > 0 && path[pathLength-1] == 'B') recordPath('L'); 
     moveForwardDistance(5, BASE_PWM_STRAIGHT);
   }
   // 3. Straight
@@ -211,11 +214,14 @@ void mazeMapping() {
   }
 }
 
-// --- SOLVING ---
 void mazeSolve() {
   int whiteCount = 0;
   for (int i = 0; i < 8; i++) if (digitalRead(sensorPins[i]) == LOW) whiteCount++;
-  if (whiteCount >= 7) { stopMotors(); while(1); }
+  if (whiteCount >= 7) { 
+    stopMotors(); 
+    Serial3.println("BT: FINISHED MAZE!");
+    while(1); 
+  }
 
   long dFront = readUltrasonic(TRIG_FRONT, ECHO_FRONT);
   long dLeft  = readUltrasonic(TRIG_LEFT,  ECHO_LEFT);
@@ -225,13 +231,12 @@ void mazeSolve() {
   bool rightOpen = (dRight > OPEN_SPACE_THRESHOLD_CM);
   bool frontBlocked = (dFront > 0 && dFront < FRONT_WALL_TRIGGER);
 
-  // Detect Intersection OR Front Wall
+  // Intersection or Front Wall detected
   if (leftOpen || rightOpen || frontBlocked) {
     
     stopMotors();
     delay(100);
 
-    // Center axles if it's an open intersection (not a wall)
     if (!frontBlocked) {
        moveForwardDistance(5, BASE_PWM_STRAIGHT); 
        stopMotors();
@@ -240,7 +245,9 @@ void mazeSolve() {
     if (readIndex < pathLength) {
       char move = path[readIndex];
       readIndex++;
-      Serial.print("Move: "); Serial.println(move);
+      
+      // DEBUG TO BLUETOOTH
+      Serial3.print("BT: Move -> "); Serial3.println(move);
 
       if (move == 'L') {
         smoothTurnLeft();
@@ -254,7 +261,10 @@ void mazeSolve() {
         if (!frontBlocked) {
            moveForwardDistance(15, BASE_PWM_STRAIGHT);
         } else {
-           keepCentered(); // Error recovery
+           // Error Handling: Path says Straight but wall exists?
+           // This implies bad mapping. Try to recover by recentering.
+           Serial3.println("BT: Error! Wall ahead but path says S.");
+           keepCentered();
         }
       }
     } else {
@@ -266,7 +276,20 @@ void mazeSolve() {
   }
 }
 
-// --- CENTER CONTROL ---
+void printPathToBluetooth() {
+  Serial.println("Mapping Finished. Path:");
+  Serial3.println("\n--- MAPPING DONE ---");
+  Serial3.print("PATH: ");
+  for(int i=0; i<pathLength; i++) {
+    Serial.print(path[i]);
+    Serial3.print(path[i]); // Print to phone
+    Serial3.print(" ");
+  }
+  Serial.println();
+  Serial3.println("\n--------------------");
+  Serial3.println("Connect Pin 33 to GND to start solving.");
+}
+
 void keepCentered() {
   long dFront = readUltrasonic(TRIG_FRONT, ECHO_FRONT);
   long dLeft  = readUltrasonic(TRIG_LEFT,  ECHO_LEFT);
@@ -319,11 +342,12 @@ void simplifyPath() {
   if (newMove != '?') {
     path[pathLength-3] = newMove;
     pathLength -= 2;
+    Serial3.print("BT: Optimized to "); Serial3.println(newMove);
   }
 }
 
 // ===================================================================================
-// 8. MOTOR & SENSOR DEFINITIONS
+// 8. HARDWARE FUNCTIONS
 // ===================================================================================
 
 void stopMotors() { stopLeft(); stopRight(); }
