@@ -45,7 +45,7 @@ const int   PIVOT_180_PWM  = 55;
 // ==================== Navigation Thresholds ====================
 const int OBSTACLE_THRESHOLD      = 8;
 const int OPEN_SPACE_THRESHOLD_CM = 40;
-const int DEAD_END_THRESHOLD      = 8;
+const int DEAD_END_THRESHOLD      = 10;
 const int NO_WALL_THRESHOLD       = 25;
 const int CORNER_CLEARANCE_CM     = 10;
 
