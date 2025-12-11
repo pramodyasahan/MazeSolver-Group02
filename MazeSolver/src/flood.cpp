@@ -2,6 +2,7 @@
 #include "common.h"
 #include "wall.h"
 #include "line.h"
+#include <Arduino.h>
 
 // ---------------- Configuration ----------------
 static int MAZE_N = 9;      // NxN logical maze (use 9 as you specified)

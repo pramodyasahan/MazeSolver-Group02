@@ -121,31 +121,116 @@ void smoothTurnRight() { pivotTurn90(false, TURN_PWM); }
 // ===============================================================
 //             NEW: Encoder-Based Forward Movement
 // ===============================================================
-void moveForwardDistance(int distance_cm, int pwmVal) {
+void moveForwardWallFollow(int distance_cm, int basePWM) {
+  if (distance_cm <= 0) return;
+
   const float wheelCircumference = PI * WHEEL_DIAMETER_CM;
   const long targetCounts = (long)(((float)distance_cm / wheelCircumference) * countsPerRev);
 
-  // Reset encoders safely
+  // Reset encoders
   noInterrupts();
   encoderCountL = 0;
   encoderCountR = 0;
   interrupts();
 
-  moveForward(pwmVal, pwmVal);
+  unsigned long tStart = millis();
+  const unsigned long TIMEOUT_MS = max(5000UL, (unsigned long)distance_cm * 60UL); // conservative timeout
 
   while (true) {
-    noInterrupts();
-    long currentL = encoderCountL;
-    long currentR = encoderCountR;
-    interrupts();
-
-    if ((absl(currentL) + absl(currentR)) / 2 >= targetCounts) {
+    // Safety timeout
+    if (millis() - tStart > TIMEOUT_MS) {
+      stopMotors();
+      // Serial.println("moveForwardWallFollow: timeout");
       break;
     }
-    delay(10);
+
+    // Encoder check
+    noInterrupts();
+    long aL = absl(encoderCountL);
+    long aR = absl(encoderCountR);
+    interrupts();
+
+    if ((aL + aR) / 2 >= targetCounts) {
+      // reached distance
+      stopMotors();
+      break;
+    }
+
+    // Read ultrasonics (non-blocking-ish; pulseIn still blocks)
+    long dFront = readUltrasonic(TRIG_FRONT, ECHO_FRONT);
+    long dLeft  = readUltrasonic(TRIG_LEFT,  ECHO_LEFT);
+    long dRight = readUltrasonic(TRIG_RIGHT, ECHO_RIGHT);
+
+    bool frontValid = dFront > 0;
+    bool leftValid  = dLeft  > 0;
+    bool rightValid = dRight > 0;
+
+    // Obstacle immediately ahead: stop and choose avoidance
+    if (frontValid && dFront < OBSTACLE_THRESHOLD) {
+      stopMotors();
+      delay(50);
+      // Align / decide turn like wallFollowingMode
+      bool turnLeft = (dLeft > dRight);
+      bool isUTurn = false;
+      if (turnLeft && dLeft > OPEN_SPACE_THRESHOLD_CM)   isUTurn = true;
+      if (!turnLeft && dRight > OPEN_SPACE_THRESHOLD_CM) isUTurn = true;
+
+      if (!isUTurn && leftValid && rightValid && (abs(dLeft - dRight) > ALIGN_TOLERANCE_CM)) {
+        if (dLeft < dRight) { pivotLeft(ALIGN_PWM); }
+        else                { pivotRight(ALIGN_PWM); }
+        delay(ALIGN_DURATION_MS);
+        stopMotors();
+        delay(50);
+      }
+
+      if (turnLeft) smoothTurnLeft();
+      else          smoothTurnRight();
+
+      // after avoidance, continue outer loop which will re-evaluate encoders/timeouts
+      continue;
+    }
+
+    // WALL FOLLOW PID (dual-wall, left-wall or right-wall fallback)
+    int leftPWM = basePWM;
+    int rightPWM = basePWM;
+
+    if (leftValid && rightValid && dLeft < WALL_DETECT_RANGE && dRight < WALL_DETECT_RANGE) {
+      int we = (int)(dLeft - dRight);
+      int corr = (int)(Kp_Wall * we);
+      corr = constrain(corr, -MAX_CORRECTION, MAX_CORRECTION);
+      leftPWM  = constrain(basePWM - corr, 0, 255);
+      rightPWM = constrain(basePWM + corr, 0, 255);
+    } else if (leftValid && dLeft < 10) {
+      int targetDist = 6;
+      int we = (int)(dLeft - targetDist);
+      int corr = (int)(Kp_Wall * we);
+      corr = constrain(corr, -MAX_CORRECTION, MAX_CORRECTION);
+      leftPWM  = constrain(basePWM + corr, 0, 255);
+      rightPWM = constrain(basePWM - corr, 0, 255);
+    } else if (rightValid && dRight < 10) {
+      int targetDist = 6;
+      int we = (int)(targetDist - dRight);
+      int corr = (int)(Kp_Wall * we);
+      corr = constrain(corr, -MAX_CORRECTION, MAX_CORRECTION);
+      leftPWM  = constrain(basePWM - corr, 0, 255);
+      rightPWM = constrain(basePWM + corr, 0, 255);
+    } else {
+      // no good wall info — drive straight at basePWM
+      leftPWM = basePWM;
+      rightPWM = basePWM;
+    }
+
+    // Apply PWMs (rightSpeed, leftSpeed ordering in your helpers)
+    analogWrite(R_RPWM, rightPWM); analogWrite(R_LPWM, 0);
+    analogWrite(L_RPWM, 0); analogWrite(L_LPWM, leftPWM);
+
+    // small delay for loop timing
+    delay(8);
   }
 
+  // ensure stop & short settle
   stopMotors();
+  delay(40);
 }
 
 // ===============================================================

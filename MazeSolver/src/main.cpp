@@ -1,7 +1,8 @@
 #include <Arduino.h>
+#include "common.h"
 #include "line.h"
 #include "wall.h"
-#include "common.h"
+#include "flood.h"
 
 // ==================== Pin Definitions ====================
 #define TRIG_FRONT 48
@@ -103,24 +104,18 @@ float integral = 0, derivative = 0, correction = 0;
 // ==================== Mode State ====================
 bool wallMode = true;
 
-// Forward declarations of functions implemented in wall.cpp and line.cpp are in the headers
-
-// ==================== Setup ====================
 void setup() {
-  // Initialize USB Serial
   Serial.begin(9600);
-
-  // Initialize Bluetooth Serial (Pins 14 TX, 15 RX on Mega)
   Serial3.begin(9600);
 
   pinMode(TRIG_FRONT, OUTPUT); pinMode(ECHO_FRONT, INPUT);
-  pinMode(TRIG_LEFT,  OUTPUT); pinMode(ECHO_LEFT,  INPUT);
+  pinMode(TRIG_LEFT, OUTPUT); pinMode(ECHO_LEFT, INPUT);
   pinMode(TRIG_RIGHT, OUTPUT); pinMode(ECHO_RIGHT, INPUT);
 
   pinMode(R_RPWM, OUTPUT); pinMode(R_LPWM, OUTPUT);
   pinMode(L_RPWM, OUTPUT); pinMode(L_LPWM, OUTPUT);
-  pinMode(R_REN, OUTPUT);  pinMode(R_LEN, OUTPUT);
-  pinMode(L_REN, OUTPUT);  pinMode(L_LEN, OUTPUT);
+  pinMode(R_REN, OUTPUT); pinMode(R_LEN, OUTPUT);
+  pinMode(L_REN, OUTPUT); pinMode(L_LEN, OUTPUT);
   digitalWrite(R_REN, HIGH); digitalWrite(R_LEN, HIGH);
   digitalWrite(L_REN, HIGH); digitalWrite(L_LEN, HIGH);
 
@@ -132,35 +127,12 @@ void setup() {
   pinMode(SEARCH_MODE, INPUT_PULLUP);
   pinMode(RIGHT_MODE, INPUT_PULLUP);
   pinMode(LEFT_MODE, INPUT_PULLUP);
-
-  // Serial.println("Robot Initialized...");
-  // Serial3.println("BT: Robot Initialized...");
 }
 
-// ===============================================================
-//                  MAIN LOOP
-// ===============================================================
 void loop() {
+  // Flood controller will read SEARCH_MODE pin: LOW => scan, HIGH => solve
+  runFloodController();
 
-    if (wallMode) {
-      wallFollowingMode();
-
-      // Check if all sensors detect white (surface)
-      int whiteCount = 0;
-      for (int i = 0; i < 8; i++) {
-        int val = digitalRead(sensorPins[i]);
-        if (val == LOW) whiteCount++;  // LOW = white
-      }
-
-      if (whiteCount >= 7) {  // all white detected
-        stopMotors();
-        delay(1000);
-        moveForward(BASE_PWM_STRAIGHT, BASE_PWM_STRAIGHT);
-        delay(1000);
-        wallMode = false;  // Switch mode
-      }
-    } else {
-      lineFollowingMode();
-    }
-
+  // keep loop idle until user toggles mode or robot finishes
+  delay(200);
 }

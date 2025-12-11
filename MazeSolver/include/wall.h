@@ -5,7 +5,7 @@
 
 // Prototypes for wall-related functions
 void wallFollowingMode();
-void moveForwardDistance(int distance_cm, int pwmVal);
+void moveForwardWallFollow(int distance_cm, int pwmVal);
 void pivot180(int pwmVal);
 void smoothTurnLeft();
 void smoothTurnRight();
