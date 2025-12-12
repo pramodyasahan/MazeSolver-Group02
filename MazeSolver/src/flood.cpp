@@ -6,11 +6,11 @@
 
 // ---------------- Configuration ----------------
 static int MAZE_N = 9;      // NxN logical maze (use 9 as you specified)
-static int CELL_CM = 25;    // cell size in cm
+static int CELL_CM = 22;    // cell size in cm
 static const int US_FRONT_TH = 10; // cm threshold to treat as wall
 static const int US_SIDE_TH  = 10;
 
-static const int INT_MAX = 1000000;
+static const long INT_MAX = 1000000;
 
 void setMazeSize(int n){ if(n>=3 && n<=15) MAZE_N = n; }
 void setCellCm(int cm){ if(cm>0) CELL_CM = cm; }
@@ -331,7 +331,10 @@ static void navigateToGoal()
     moveOneCellForward();
     if (detectWhiteGoalAtCurrent()) {
       maze[rx][ry].isGoal = true;
-      Serial.printf("Found goal at %d,%d\n", rx, ry);
+      Serial.print("Found goal at ");
+      Serial.print(rx);
+      Serial.print(",");
+      Serial.println(ry);
       break;
     }
     // if we discover new walls while moving, recompute distances for safety
