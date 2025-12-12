@@ -51,7 +51,7 @@ const int NO_WALL_THRESHOLD       = 25;
 const int CORNER_CLEARANCE_CM     = 10;
 
 // ==================== Wall Following ====================
-const int   BASE_PWM_STRAIGHT = 60;
+const int   BASE_PWM_STRAIGHT = 40;
 const float Kp_Wall           = 3.5f;
 const int   MAX_CORRECTION    = 20;
 const int   WALL_DETECT_RANGE = 20;

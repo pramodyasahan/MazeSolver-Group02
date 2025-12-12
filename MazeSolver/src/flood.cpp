@@ -5,9 +5,9 @@
 #include <Arduino.h>
 
 // ---------------- Configuration ----------------
-static int MAZE_N = 9;      // NxN logical maze (use 9 as you specified)
-static int CELL_CM = 22;    // cell size in cm
-static const int US_FRONT_TH = 10; // cm threshold to treat as wall
+static int MAZE_N = 9;      // NxN logical maze
+static int CELL_CM = 24;    // cell size in cm
+static const int US_FRONT_TH = 12; // cm threshold to treat as wall
 static const int US_SIDE_TH  = 10;
 
 static const long INT_MAX = 1000000;
@@ -22,7 +22,7 @@ struct Cell {
   bool isGoal;
 };
 
-static Cell maze[16][16]; // support up to 16x16; we use MAZE_N
+static Cell maze[16][16]; 
 static int distMap[16][16];
 
 enum Dir { NORTH=0, EAST=1, SOUTH=2, WEST=3, UNKNOWN_DIR=-1 };
@@ -41,10 +41,6 @@ static void dirToDelta(Dir d, int &dx, int &dy) {
 }
 
 // ---------- Debug / status helpers ----------
-
-// Return true if every cell in the logical MAZE_N x MAZE_N grid has been visited.
-// NOTE: this checks the whole grid. If you want "all reachable visited", use a different test
-// (but with DFS scanning, visited==true for reachable cells; unreachable cells remain false).
 static bool isMazeFullyScanned()
 {
   for (int x = 0; x < MAZE_N; ++x) {
@@ -55,26 +51,20 @@ static bool isMazeFullyScanned()
   return true;
 }
 
-// Return whether the given absolute direction (0=N,1=E,2=S,3=W) has a wall in current cell.
-// Guarded by inBounds check for safety.
 static bool hasWallAbsolute(int absDir)
 {
-  if (!inBounds(rx, ry)) return true; // treat out-of-bounds as wall
+  if (!inBounds(rx, ry)) return true; 
   return maze[rx][ry].wall[absDir];
 }
 
-// Get wall presence relative to robot facing:
-// rel = 0 -> front, rel = 1 -> right, rel = -1 -> left, rel = 2 or -2 -> back
 static bool hasWallRelative(int rel)
 {
   int absDir = (int)rface + rel;
-  // normalize to 0..3
   absDir %= 4;
   if (absDir < 0) absDir += 4;
   return hasWallAbsolute(absDir);
 }
 
-// Convert Dir to textual name
 static const char* dirName(Dir d) {
   switch(d) {
     case NORTH: return "NORTH";
@@ -85,63 +75,64 @@ static const char* dirName(Dir d) {
   }
 }
 
-// Print a short status line: logical position, facing, walls (front/left/right), scanned flag
 static void printStatus()
 {
-  // Print position and facing
   Serial.print("POS: ");
   Serial.print(rx); Serial.print(","); Serial.print(ry);
   Serial.print("  F: "); Serial.print(dirName(rface));
   Serial.print("  Walls[F/L/R]: ");
 
-  // front: rel = 0
   Serial.print(hasWallRelative(0) ? "1" : "0"); Serial.print("/");
-  // left: rel = -1 (or +3)
   Serial.print(hasWallRelative(-1) ? "1" : "0"); Serial.print("/");
-  // right: rel = +1
   Serial.print(hasWallRelative(1) ? "1" : "0");
 
-  // visited & goal
   Serial.print("  Visited: "); Serial.print(maze[rx][ry].visited ? "Y" : "N");
   Serial.print("  GoalHere: "); Serial.print(maze[rx][ry].isGoal ? "Y" : "N");
 
-  // entire maze scanned?
   bool allScanned = isMazeFullyScanned();
   Serial.print("  AllScanned: "); Serial.println(allScanned ? "Y" : "N");
 }
-
 
 // rotate robot physically to face target direction (min turns)
 static void rotateToFace(Dir target)
 {
   if (target == rface) return;
   int diff = (int)target - (int)rface;
+  
   if (diff <= -3) diff += 4;
   if (diff >= 3) diff -= 4;
 
   if (diff == 1 || diff == -3) {
-    smoothTurnLeft();
+    smoothTurnRight(); 
   } else if (diff == -1 || diff == 3) {
-    smoothTurnRight();
+    smoothTurnLeft();  
   } else if (abs(diff) == 2) {
     pivot180(PIVOT_180_PWM);
   }
+  
   rface = target;
   delay(80);
 }
 
-// Move forward exactly one cell (encoder-driven)
-static void moveOneCellForward()
+// Move forward exactly one cell
+// RETURNS TRUE ONLY IF SUCCESSFUL
+static bool moveOneCellForward()
 {
-  moveForwardWallFollow(CELL_CM, BASE_PWM_STRAIGHT);
+  // This uses the bool return we added to wall.cpp
+  bool moved = moveForwardWallFollow(CELL_CM, BASE_PWM_STRAIGHT);
   stopMotors();
-  // update logical location
-  int dx,dy; dirToDelta(rface, dx, dy);
-  rx += dx; ry += dy;
-  delay(50);
+
+  if (moved) {
+    // only update coordinates if physical move succeeded
+    int dx,dy; dirToDelta(rface, dx, dy);
+    rx += dx; ry += dy;
+    return true;
+  } else {
+    Serial.println("ERR: Move Incomplete. Staying in cell.");
+    return false;
+  }
 }
 
-// Use IR line sensors to test whether current cell is goal (all white)
 static bool detectWhiteGoalAtCurrent()
 {
   readSensors();
@@ -149,21 +140,19 @@ static bool detectWhiteGoalAtCurrent()
   return true;
 }
 
-// Sense walls around robot using ultrasonics and update maze table
 static void senseWallsAtCurrent()
 {
   long front = readUltrasonic(TRIG_FRONT, ECHO_FRONT);
   long left  = readUltrasonic(TRIG_LEFT, ECHO_LEFT);
   long right = readUltrasonic(TRIG_RIGHT, ECHO_RIGHT);
 
-  // front
   if (front>0 && front < US_FRONT_TH) {
     maze[rx][ry].wall[rface] = true;
     int dx,dy; dirToDelta(rface, dx, dy);
     int nx=rx+dx, ny=ry+dy;
     if (inBounds(nx,ny)) maze[nx][ny].wall[(rface+2)%4] = true;
   }
-  // left
+  
   Dir leftDir = (Dir)((rface+3)%4);
   if (left>0 && left < US_SIDE_TH) {
     maze[rx][ry].wall[leftDir] = true;
@@ -171,7 +160,7 @@ static void senseWallsAtCurrent()
     int nx=rx+dx, ny=ry+dy;
     if (inBounds(nx,ny)) maze[nx][ny].wall[(leftDir+2)%4] = true;
   }
-  // right
+  
   Dir rightDir = (Dir)((rface+1)%4);
   if (right>0 && right < US_SIDE_TH) {
     maze[rx][ry].wall[rightDir] = true;
@@ -181,17 +170,13 @@ static void senseWallsAtCurrent()
   }
 }
 
-// Flood (distance) computation (BFS) from all goal cells
 static void computeDistancesToGoals()
 {
-  // init
   for (int x=0;x<MAZE_N;x++) for (int y=0;y<MAZE_N;y++) distMap[x][y] = INT_MAX;
 
-  // queue
   struct P { int x,y; };
   P q[256]; int qh=0, qt=0;
 
-  // push all goal cells
   for (int x=0;x<MAZE_N;x++) for (int y=0;y<MAZE_N;y++) {
     if (maze[x][y].isGoal) {
       distMap[x][y]=0;
@@ -199,7 +184,6 @@ static void computeDistancesToGoals()
     }
   }
 
-  // if no explicit goal found, use centre cell(s)
   if (qh==qt) {
     int mid = MAZE_N/2;
     if (MAZE_N%2==1) { distMap[mid][mid]=0; q[qt++] = {mid,mid}; }
@@ -227,7 +211,6 @@ static void computeDistancesToGoals()
   }
 }
 
-// Pick neighbor with smallest distMap value (prefer forward, right, left, back)
 static Dir pickBestNeighborToReduceDistance()
 {
   int best = INT_MAX; Dir bestDir = UNKNOWN_DIR;
@@ -244,85 +227,102 @@ static Dir pickBestNeighborToReduceDistance()
   return bestDir;
 }
 
-// DFS scan: explore reachable cells and populate maze[][]. Uses stack for backtracking.
 static void scanMazeDFS()
 {
-  // init maze
+  // Initialization
   for (int x=0;x<MAZE_N;x++) for (int y=0;y<MAZE_N;y++) {
     for (int d=0; d<4; ++d) maze[x][y].wall[d] = false;
     maze[x][y].visited = false; maze[x][y].isGoal = false;
   }
-  // mark outer walls
   for (int x=0;x<MAZE_N;x++){ maze[x][0].wall[SOUTH]=true; maze[x][MAZE_N-1].wall[NORTH]=true; }
   for (int y=0;y<MAZE_N;y++){ maze[0][y].wall[WEST]=true; maze[MAZE_N-1][y].wall[EAST]=true; }
 
-  // start pose (assumed)
   rx = 0; ry = 0; rface = NORTH;
   maze[rx][ry].visited = true;
 
-  // simple stack storing parent coordinates
   struct C { int x,y; };
   C stackArr[256]; int sp = 0;
   stackArr[sp++] = {rx,ry};
 
   while (sp > 0) {
-    // sense current cell
     senseWallsAtCurrent();
     if (detectWhiteGoalAtCurrent()) maze[rx][ry].isGoal = true;
 
-    // ---- DEBUG: print current cell status ----
     printStatus();
 
-
-    // find unvisited neighbor with preference forward,right,left,back
+    // Look for unvisited neighbors
     bool found = false;
     const int prefRel[4] = {0,1,3,2};
     for (int k=0;k<4 && !found;k++) {
       Dir d = (Dir)((rface + prefRel[k]) % 4);
       if (maze[rx][ry].wall[d]) continue;
+      
       int dx,dy; dirToDelta(d,dx,dy);
       int nx=rx+dx, ny=ry+dy;
+      
       if (!inBounds(nx,ny)) continue;
+      
       if (!maze[nx][ny].visited) {
-        // push current location as parent then move
-        stackArr[sp++] = {rx,ry};
+        // We found an unvisited neighbor. Try to move there.
         rotateToFace(d);
-        moveOneCellForward();
-        maze[rx][ry].visited = true;
-        found = true;
+        
+        bool moveSuccess = moveOneCellForward();
+        
+        if (moveSuccess) {
+          // Push *old* parent position to stack
+          stackArr[sp++] = {rx - dx, ry - dy}; 
+          maze[rx][ry].visited = true;
+          found = true;
+        } else {
+          // ERROR: Failed to move (obstacle or stuck).
+          // We are still at the old cell.
+          // Mark this direction as a wall so we don't try it again immediately.
+          maze[rx][ry].wall[d] = true;
+          Serial.println("Move failed. Marking wall and retrying.");
+          // found remains false, loop will continue to try next neighbor
+        }
       }
     }
+
     if (!found) {
-      // backtrack to parent
+      // Backtracking
       C parent = stackArr[--sp];
-      // physically move to parent cell (we assume adjacency)
+      
       int dx = parent.x - rx;
       int dy = parent.y - ry;
+      
       Dir desired = UNKNOWN_DIR;
       if (dx==1 && dy==0) desired = EAST;
       else if (dx==-1 && dy==0) desired = WEST;
       else if (dx==0 && dy==1) desired = NORTH;
       else if (dx==0 && dy==-1) desired = SOUTH;
+      
       if (desired != UNKNOWN_DIR) {
         rotateToFace(desired);
-        moveOneCellForward();
+        bool backSuccess = moveOneCellForward();
+        if (!backSuccess) {
+           Serial.println("CRITICAL: Stuck during backtracking! Halting to prevent reset.");
+           // Re-push parent so we don't lose track, effectively staying in this state
+           stackArr[sp++] = parent;
+           stopMotors();
+           while(1); // Stop here so you can see the error, instead of resetting to 0,0
+        }
       } else {
-        // not adjacent: break for safety
-        break;
+        // This happens if logical position desyncs (e.g. attempting to jump diagonal)
+        Serial.println("Logic Error: Non-adjacent backtrack. Halting.");
+        stopMotors();
+        while(1);
       }
     }
-  } // end while
+  } 
 }
 
-// Navigate to a goal using flood distances
 static void navigateToGoal()
 {
   computeDistancesToGoals();
-
-  // loop until current cell is goal
   while (!maze[rx][ry].isGoal) {
     Dir next = pickBestNeighborToReduceDistance();
-    if (next == UNKNOWN_DIR) { // cannot find path
+    if (next == UNKNOWN_DIR) {
       stopMotors();
       Serial.println("No path found.");
       return;
@@ -331,25 +331,21 @@ static void navigateToGoal()
     moveOneCellForward();
     if (detectWhiteGoalAtCurrent()) {
       maze[rx][ry].isGoal = true;
-      Serial.print("Found goal at ");
-      Serial.print(rx);
-      Serial.print(",");
-      Serial.println(ry);
+      Serial.print("Found goal at "); Serial.print(rx); Serial.print(","); Serial.println(ry);
       break;
     }
-    // if we discover new walls while moving, recompute distances for safety
     senseWallsAtCurrent();
     computeDistancesToGoals();
   }
   stopMotors();
 }
 
-// Controller called from loop: chooses scan or solve based on SEARCH_MODE pin
 void runFloodController()
 {
   static bool scanned = false;
-  int mode = digitalRead(SEARCH_MODE); // HIGH = solve(1), LOW = scan(0)
+  int mode = digitalRead(SEARCH_MODE); 
   if (mode == LOW) {
+    // Only run scan if not already finished (optional check, or just run repeatedly)
     Serial.println("Scan mode");
     scanMazeDFS();
     scanned = true;
