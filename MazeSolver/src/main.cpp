@@ -32,43 +32,42 @@ const uint8_t sensorPins[8] = {22, 23, 24, 25, 26, 27, 28, 29};
 const bool BLACK_IS_HIGH = true; 
 
 // ===================================================================================
-// 2. CONSTANTS & TUNING (FROM CODE A)
+// 2. CONSTANTS & TUNING
 // ===================================================================================
 const float WHEEL_DIAMETER_CM = 6.5f;
 const int pulsesPerMotorRev   = 11;
 const int gearRatio           = 20;
 const int countsPerRev        = pulsesPerMotorRev * gearRatio * 2;
 
-// --- Turning Configuration (CODE A SPECIFIC) ---
+// --- Turning ---
 const int   TURN_PWM       = 50;
-const float TURN_RADIUS_CM = 11.0f;
 const int   PIVOT_180_PWM  = 55;
-const int   TICKS_90_DEG   = 560; // From Code A
+const int   TICKS_90_DEG   = 560; 
 
-// --- Navigation Thresholds (CODE A SPECIFIC) ---
+// --- Navigation Thresholds ---
 const int OBSTACLE_THRESHOLD      = 8;
-const int OPEN_SPACE_THRESHOLD_CM = 40;
+const int OPEN_SPACE_THRESHOLD_CM = 30;
 const int DEAD_END_THRESHOLD      = 10;
 const int NO_WALL_THRESHOLD       = 25;
-const int CORNER_CLEARANCE_CM     = 10; // Crucial for timing turns
+const int CORNER_CLEARANCE_CM     = 10; 
 
 // --- Wall Following ---
 const int   BASE_PWM_STRAIGHT = 60;
 const float Kp_Wall           = 3.5f;
-const float Kd_Wall           = 10.0f; // Kept Kd for stability in combined code
+const float Kd_Wall           = 10.0f;
 const int   MAX_CORRECTION    = 20;
 const int   WALL_DETECT_RANGE = 20;
-const int   TARGET_WALL_DIST  = 7;
 
 // --- Alignment ---
 const int ALIGN_PWM         = 45;
 const int ALIGN_DURATION_MS = 50;
 const int ALIGN_TOLERANCE_CM= 1;
 
-// --- Finish Line Settings (FROM PREVIOUS CORRECT CODE) ---
-const int FINISH_LINE_SENSITIVITY = 4; // Sensitivity for stop
+// --- Finish / Transition Settings ---
+const int FINISH_LINE_SENSITIVITY = 2; // Number of White sensors to detect finish
+const int BLACK_LINE_SENSITIVITY  = 6; // Number of Black sensors to detect transition to Big Maze
 
-// --- Line Following PID (FOR COMBINED STATES) ---
+// --- Line Following PID ---
 const int   TURN_PWM_LINE     = 140; 
 float Kp_Line = 50.0;
 float Ki_Line = 0.0;
@@ -86,15 +85,22 @@ const uint16_t PIVOT_TIMEOUT_MS = 600;
 const uint16_t BRAKE_MS = 30;
 
 // ===================================================================================
-// 3. GLOBALS
+// 3. GLOBALS & STATE MACHINE
 // ===================================================================================
 volatile long encoderCountL = 0;
 volatile long encoderCountR = 0;
 unsigned long lastDebugTime = 0; 
 
-char path[200];       
-int pathLength = 0;   
-int readIndex = 0;    
+// --- Path Memory ---
+char pathSmall[100];       
+int pathLenSmall = 0;   
+char pathBig[100];
+int pathLenBig = 0;
+
+// Pointers to the "Active" path being recorded or read
+char* currentPathArr; 
+int*  currentPathLenPtr;
+int   readIndex = 0;    
 
 uint8_t sensorVal[8];
 uint8_t sensorBits = 0;
@@ -105,18 +111,20 @@ float integralLine = 0;
 
 unsigned long modeStartTime = 0;
 
+// --- Updated States ---
 enum RobotState {
-  STATE_MAPPING_1,      
-  STATE_WAIT_1,         
-  STATE_SOLVING_1,      
-  STATE_LINE_FOLLOW,    
-  STATE_MAPPING_2,      
-  STATE_WAIT_2,         
-  STATE_SOLVING_2,      
-  STATE_DONE            
+  STATE_MAPPING_SMALL,   // Phase 1: Map Small Maze
+  STATE_TRANS_TO_LINE,   // Small -> Line Transition
+  STATE_LINE_FOLLOW,     // Phase 1: Follow Line to Big Maze
+  STATE_MAPPING_BIG,     // Phase 1: Map Big Maze
+  STATE_WAIT_FOR_RUN2,   // Phase 1 Done: Wait for Pin 33
+  STATE_SOLVING_SMALL,   // Phase 2: Solve Small Maze
+  STATE_SOLVING_LINE,    // Phase 2: Follow Line
+  STATE_SOLVING_BIG,     // Phase 2: Solve Big Maze
+  STATE_DONE             // Completely Finished
 };
 
-RobotState currentState = STATE_MAPPING_1;
+RobotState currentState = STATE_MAPPING_SMALL;
 
 // ===================================================================================
 // 4. FUNCTION PROTOTYPES
@@ -124,30 +132,28 @@ RobotState currentState = STATE_MAPPING_1;
 void stopMotors(); 
 long readUltrasonic(int trigPin, int echoPin);
 void readLineSensors();
-void printIRValues(); // Debug
+void printIRValues(); 
 void countEncoderL(); void countEncoderR();
 
 void moveForward(int pwmValR, int pwmValL);
 void moveForwardDistance(int distance_cm, int pwmVal);
-
-// Turn functions from Code A
 void pivotTurn90(bool leftTurn, int pwmOuterMax);
 void pivot180(int pwmVal);
-void smoothTurnLeft();
-void smoothTurnRight();
+void smoothTurnLeft(); void smoothTurnRight();
 void pivotLeft(int pwmVal); void pivotRight(int pwmVal);
 
 // Line Follow Helpers
 void pivotLeftUntilCenter(); void pivotRightUntilCenter();
 void pivotLeft90UntilLine(int pwmVal); 
 
+// Logic
 void logicMapping();
 void logicSolving();
-void logicLineFollow();
+void logicLineFollow(bool isMappingPhase); // Combined logic
 void PID_Logic_Wall(long dLeft, long dRight);
 void recordPath(char direction);
 void simplifyPath();
-void printPathToBluetooth();
+void printPaths();
 void brake(uint16_t ms);
 
 inline long absl(long x){ return (x < 0) ? -x : x; }
@@ -181,8 +187,12 @@ void setup() {
 
   for(int i=0; i<8; i++) pinMode(sensorPins[i], INPUT);
 
+  // Initialize Pointers for Small Maze Mapping
+  currentPathArr = pathSmall;
+  currentPathLenPtr = &pathLenSmall;
+
   stopMotors();
-  Serial3.println("BT: Robot Ready. Code A Logic + Combined States.");
+  Serial3.println("BT: Robot Ready. Optimized Logic.");
   modeStartTime = millis();
 }
 
@@ -191,47 +201,60 @@ void setup() {
 // ===================================================================================
 void loop() {
   switch (currentState) {
-    case STATE_MAPPING_1:
+    
+    // --- PHASE 1: MAPPING ---
+    case STATE_MAPPING_SMALL:
       logicMapping(); 
       break;
 
-    case STATE_WAIT_1:
-      stopMotors();
-      readLineSensors();
-      printIRValues();
-      if (digitalRead(SEARCH_MODE) == LOW) {
-        delay(1000); 
-        Serial3.println("BT: Solving 1...");
-        modeStartTime = millis(); 
-        currentState = STATE_SOLVING_1;
-      }
-      break;
-
-    case STATE_SOLVING_1:
-      logicSolving();
+    case STATE_TRANS_TO_LINE:
+      // Just a small push to ensure we are clearly ON the line before logic takes over
+      moveForwardDistance(4, BASE_PWM_STRAIGHT);
+      currentState = STATE_LINE_FOLLOW;
       break;
 
     case STATE_LINE_FOLLOW:
-      logicLineFollow();
+      // True = Mapping Phase (Looks for walls+black to enter big maze)
+      logicLineFollow(true); 
       break;
 
-    case STATE_MAPPING_2:
+    case STATE_MAPPING_BIG:
       logicMapping();
       break;
 
-    case STATE_WAIT_2:
+    // --- INTERMISSION ---
+    case STATE_WAIT_FOR_RUN2:
       stopMotors();
-      readLineSensors();
-      printIRValues();
+      if (millis() - lastDebugTime > 2000) {
+        Serial3.println("BT: Waiting for Pin 33 (LOW) to Solve...");
+        printPaths();
+        lastDebugTime = millis();
+      }
       if (digitalRead(SEARCH_MODE) == LOW) {
-        delay(1000);
-        Serial3.println("BT: Solving 2...");
-        modeStartTime = millis(); 
-        currentState = STATE_SOLVING_2;
+        delay(1000); // Debounce
+        Serial3.println("BT: STARTING SOLVE RUN!");
+        
+        // Setup for Solving Small Maze
+        currentPathArr = pathSmall;
+        currentPathLenPtr = &pathLenSmall;
+        readIndex = 0;
+        
+        modeStartTime = millis();
+        currentState = STATE_SOLVING_SMALL;
       }
       break;
 
-    case STATE_SOLVING_2:
+    // --- PHASE 2: SOLVING ---
+    case STATE_SOLVING_SMALL:
+      logicSolving();
+      break;
+
+    case STATE_SOLVING_LINE:
+      // False = Solving Phase (Looks for walls+black to enter Big Maze Solve)
+      logicLineFollow(false);
+      break;
+
+    case STATE_SOLVING_BIG:
       logicSolving();
       break;
 
@@ -242,38 +265,32 @@ void loop() {
 }
 
 // ===================================================================================
-// 7. MAZE MAPPING LOGIC (ADAPTED FROM CODE A)
+// 7. MAZE MAPPING LOGIC
 // ===================================================================================
 void logicMapping() {
-  // 1. UPDATE SENSORS & DEBUG
   readLineSensors();
-  printIRValues(); 
-
-  // 2. FINISH CHECK (From Previous Correct Code)
+  
+  // 1. CHECK FOR END OF CURRENT MAZE (White Line)
   int whiteCount = 0;
   for (int i = 0; i < 8; i++) if (sensorVal[i] == 0) whiteCount++; 
 
   if (whiteCount >= FINISH_LINE_SENSITIVITY) {
     stopMotors(); 
-    Serial3.println("BT: Finish Detected (Mapping)");
-    moveForwardDistance(5, BASE_PWM_STRAIGHT); // Ensure we are on line
-    stopMotors();
-
-    if (currentState == STATE_MAPPING_1) {
-       Serial3.println("BT: Map 1 Done. Waiting...");
-       printPathToBluetooth();
-       currentState = STATE_WAIT_1;
+    
+    if (currentState == STATE_MAPPING_SMALL) {
+       Serial3.println("BT: Small Map Done -> Line Follow");
+       recordPath('S'); // Usually straight out of the maze
+       currentState = STATE_TRANS_TO_LINE;
     } 
-    else if (currentState == STATE_MAPPING_2) {
-       Serial3.println("BT: Map 2 Done. Waiting...");
-       printPathToBluetooth();
-       currentState = STATE_WAIT_2;
+    else if (currentState == STATE_MAPPING_BIG) {
+       Serial3.println("BT: Big Map Done -> Wait");
+       recordPath('S'); 
+       currentState = STATE_WAIT_FOR_RUN2;
     }
-    delay(1000); 
     return;
   }
 
-  // 3. NAVIGATION (From Code A)
+  // 2. STANDARD WALL FOLLOWING & MAPPING
   long dFront = readUltrasonic(TRIG_FRONT, ECHO_FRONT);
   long dLeft  = readUltrasonic(TRIG_LEFT,  ECHO_LEFT);
   long dRight = readUltrasonic(TRIG_RIGHT, ECHO_RIGHT);
@@ -282,7 +299,7 @@ void logicMapping() {
   bool leftValid  = (dLeft  > 0);
   bool rightValid = (dRight > 0);
 
-  // --- A. DEAD END ---
+  // A. DEAD END
   if (frontValid && dFront < OBSTACLE_THRESHOLD &&
       leftValid  && dLeft  < DEAD_END_THRESHOLD &&
       rightValid && dRight < DEAD_END_THRESHOLD)
@@ -294,20 +311,18 @@ void logicMapping() {
       return;
   }
 
-  // --- B. OBSTACLE AHEAD (Wall in Front) ---
+  // B. OBSTACLE AHEAD
   else if (frontValid && dFront < OBSTACLE_THRESHOLD) {
     stopMotors(); delay(100);
 
-    // Alignment
+    // Alignment before turn
     if (leftValid && rightValid && (abs(dLeft - dRight) > ALIGN_TOLERANCE_CM)) {
-      if (dLeft < dRight) { pivotLeft(ALIGN_PWM); }
-      else                { pivotRight(ALIGN_PWM); }
+      if (dLeft < dRight) pivotLeft(ALIGN_PWM); else pivotRight(ALIGN_PWM);
       delay(ALIGN_DURATION_MS);
       stopMotors(); delay(100);
     }
 
     bool realLeftOpen = (leftValid && dLeft > NO_WALL_THRESHOLD);
-    
     if (realLeftOpen) {
        smoothTurnLeft();
        recordPath('L');
@@ -319,11 +334,9 @@ void logicMapping() {
     return;
   }
 
-  // --- C. NO WALL ON LEFT (Left Turn Available) ---
+  // C. LEFT OPEN
   else if (leftValid && dLeft > NO_WALL_THRESHOLD) {
-    // Code A's critical timing: Move forward then turn
     moveForwardDistance(CORNER_CLEARANCE_CM, BASE_PWM_STRAIGHT);
-    
     stopMotors(); delay(10);
     smoothTurnLeft();
     recordPath('L'); 
@@ -331,9 +344,10 @@ void logicMapping() {
     return;
   }
 
-  // --- D. PATH CLEAR (PID + Straight) ---
+  // D. STRAIGHT (PID)
   else {
     if (rightValid && dRight > NO_WALL_THRESHOLD) {
+        // If right is open but front is clear, we must go straight (Left Hand Rule preference)
         if (dFront > OPEN_SPACE_THRESHOLD_CM) {
              recordPath('S');
              moveForwardDistance(15, BASE_PWM_STRAIGHT); 
@@ -345,36 +359,31 @@ void logicMapping() {
 }
 
 // ===================================================================================
-// 8. MAZE SOLVING LOGIC (ADAPTED FROM CODE A)
+// 8. MAZE SOLVING LOGIC
 // ===================================================================================
 void logicSolving() {
   readLineSensors();
-  printIRValues();
 
-  // 1. FINISH CHECK (From Previous Correct Code)
-  if (millis() - modeStartTime > 1500) {
-    int whiteCount = 0;
-    for (int i = 0; i < 8; i++) if (sensorVal[i] == 0) whiteCount++;
+  // 1. CHECK FOR END OF CURRENT MAZE
+  int whiteCount = 0;
+  for (int i = 0; i < 8; i++) if (sensorVal[i] == 0) whiteCount++;
 
-    if (whiteCount >= FINISH_LINE_SENSITIVITY) {
-      stopMotors(); 
-      Serial3.println("BT: Finish Detected (Solving)");
-
-      if (currentState == STATE_SOLVING_1) {
-        Serial3.println("BT: Solve 1 Done -> Line Follow");
-        moveForwardDistance(5, BASE_PWM_STRAIGHT); 
-        modeStartTime = millis(); 
-        currentState = STATE_LINE_FOLLOW;
-      }
-      else if (currentState == STATE_SOLVING_2) {
-        Serial3.println("BT: Solve 2 Done -> COMPLETE");
-        currentState = STATE_DONE;
-      }
-      return;
+  if (whiteCount >= FINISH_LINE_SENSITIVITY) {
+    stopMotors(); 
+    
+    if (currentState == STATE_SOLVING_SMALL) {
+      Serial3.println("BT: Small Solved -> Line Follow");
+      moveForwardDistance(5, BASE_PWM_STRAIGHT); 
+      currentState = STATE_SOLVING_LINE;
     }
+    else if (currentState == STATE_SOLVING_BIG) {
+      Serial3.println("BT: Big Solved -> DONE");
+      currentState = STATE_DONE;
+    }
+    return;
   }
 
-  // 2. NAVIGATION (From Code A)
+  // 2. EXECUTE PATH
   long dFront = readUltrasonic(TRIG_FRONT, ECHO_FRONT);
   long dLeft  = readUltrasonic(TRIG_LEFT,  ECHO_LEFT);
   long dRight = readUltrasonic(TRIG_RIGHT, ECHO_RIGHT);
@@ -383,18 +392,19 @@ void logicSolving() {
   bool rightOpen = (dRight > NO_WALL_THRESHOLD);
   bool frontBlocked = (dFront > 0 && dFront < OBSTACLE_THRESHOLD);
 
+  // Check if we are at an intersection or corner
   if (leftOpen || rightOpen || frontBlocked) {
     stopMotors(); delay(100);
 
-    // Alignment
+    // Align if hit wall
     if (frontBlocked && dLeft > 0 && dRight > 0 && abs(dLeft - dRight) > ALIGN_TOLERANCE_CM) {
        if (dLeft < dRight) pivotLeft(ALIGN_PWM); else pivotRight(ALIGN_PWM);
        delay(ALIGN_DURATION_MS);
        stopMotors();
     }
 
-    if (readIndex < pathLength) {
-      char move = path[readIndex];
+    if (readIndex < *currentPathLenPtr) {
+      char move = currentPathArr[readIndex];
       readIndex++;
       Serial3.print("BT: Doing -> "); Serial3.println(move);
 
@@ -414,6 +424,7 @@ void logicSolving() {
         moveForwardDistance(15, BASE_PWM_STRAIGHT);
       }
     } else {
+       // Ran out of instructions, default to wall follow just in case
        PID_Logic_Wall(dLeft, dRight);
     }
   } 
@@ -423,31 +434,44 @@ void logicSolving() {
 }
 
 // ===================================================================================
-// 9. LINE FOLLOWING LOGIC (UNCHANGED)
+// 9. LINE FOLLOWING LOGIC (Handles transition to Big Maze)
 // ===================================================================================
-void logicLineFollow() {
+void logicLineFollow(bool isMappingPhase) {
   readLineSensors();
   
-  // 1. BLACK STOP CONDITION
-  if (millis() - modeStartTime > 3000) {
-    int blackCount = 0;
-    for(int i=0; i<8; i++) if(sensorVal[i] == 1) blackCount++;
+  // 1. CHECK FOR ENTRY TO BIG MAZE (Black Line End + Walls)
+  // Condition: Mostly Black line sensors OR End of line AND Walls detected
+  int blackCount = 0;
+  for(int i=0; i<8; i++) if(sensorVal[i] == 1) blackCount++;
 
-    if (blackCount >= 7) {
-      stopMotors();
-      Serial3.println("BT: End of Line. Resetting Map 2...");
-      delay(2000); 
-      
-      // Reset Path Memory for Maze 2
-      pathLength = 0;
-      readIndex = 0;
-      
-      currentState = STATE_MAPPING_2;
-      return;
+  if (blackCount >= BLACK_LINE_SENSITIVITY) {
+    long dLeft  = readUltrasonic(TRIG_LEFT,  ECHO_LEFT);
+    long dRight = readUltrasonic(TRIG_RIGHT, ECHO_RIGHT);
+    
+    // Check for walls to confirm we are entering the maze
+    if ((dLeft > 0 && dLeft < WALL_DETECT_RANGE) || (dRight > 0 && dRight < WALL_DETECT_RANGE)) {
+        stopMotors();
+        Serial3.println("BT: Entering Big Maze...");
+        
+        moveForwardDistance(10, BASE_PWM_STRAIGHT); // Move fully into maze
+        
+        if (isMappingPhase) {
+            // Setup for Mapping Big Maze
+            currentPathArr = pathBig;
+            currentPathLenPtr = &pathLenBig;
+            currentState = STATE_MAPPING_BIG;
+        } else {
+            // Setup for Solving Big Maze
+            currentPathArr = pathBig;
+            currentPathLenPtr = &pathLenBig;
+            readIndex = 0;
+            currentState = STATE_SOLVING_BIG;
+        }
+        return;
     }
   }
 
-  // 2. INTERSECTIONS
+  // 2. INTERSECTIONS (Standard Line Following)
   bool center = (sensorVal[CENTER_IDX[0]] || sensorVal[CENTER_IDX[1]]);
   uint8_t leftCount = 0;  for(int i=0; i<3; i++) if(sensorVal[LEFT_IDX[i]]) leftCount++;
   uint8_t rightCount = 0; for(int i=0; i<3; i++) if(sensorVal[RIGHT_IDX[i]]) rightCount++;
@@ -461,8 +485,9 @@ void logicLineFollow() {
   else {
     // 3. PID
     if (sensorBits == 0) {
-       if(millis() - modeStartTime > 1000) pivotLeft90UntilLine(50);
-       else moveForward(baseSpeedLine, baseSpeedLine); 
+       // If lost line, drift slightly or stop. 
+       // In transition to big maze, it might be all white for a moment or all black.
+       moveForward(baseSpeedLine, baseSpeedLine); 
        return;
     }
 
@@ -489,22 +514,7 @@ void logicLineFollow() {
 // 10. HELPER FUNCTIONS
 // ===================================================================================
 
-// --- DEBUG ---
-void printIRValues() {
-  if (millis() - lastDebugTime > 100) {
-    lastDebugTime = millis();
-    int wCount = 0;
-    String irStatus = "";
-    for (int i = 0; i < 8; i++) {
-      irStatus += String(sensorVal[i]) + " ";
-      if (sensorVal[i] == 0) wCount++;
-    }
-    Serial3.print("IR: ["); Serial3.print(irStatus);
-    Serial3.print("] WC: "); Serial3.println(wCount);
-  }
-}
-
-// --- PID WALL (Based on Code A logic) ---
+// --- PID WALL ---
 void PID_Logic_Wall(long dLeft, long dRight) {
   int leftSpeed, rightSpeed;
   bool leftValid = (dLeft > 0);
@@ -519,7 +529,7 @@ void PID_Logic_Wall(long dLeft, long dRight) {
   }
   else if (leftValid && dLeft < 10) {
     int targetDist = 6;
-    int error = (int)(dLeft - targetDist);
+    int error = (int)(targetDist - dLeft);
     int correction = (int)(Kp_Wall * error);
     correction = constrain(correction, -MAX_CORRECTION, MAX_CORRECTION);
     leftSpeed  = constrain(BASE_PWM_STRAIGHT + correction, 0, 100);
@@ -541,9 +551,47 @@ void PID_Logic_Wall(long dLeft, long dRight) {
   delay(10);
 }
 
-// --- MOVEMENT FROM CODE A ---
+// --- RECORDING ---
+void recordPath(char direction) {
+  // Use the pointer to the active array (Small or Big)
+  currentPathArr[*currentPathLenPtr] = direction; 
+  (*currentPathLenPtr)++; 
+  simplifyPath();
+}
+
+void simplifyPath() {
+  int len = *currentPathLenPtr;
+  if (len < 3 || currentPathArr[len-2] != 'B') return;
+  
+  char prev = currentPathArr[len-3];
+  char curr = currentPathArr[len-1];
+  char newMove = '?';
+
+  // LBL -> S, LBS -> R, RBL -> B, SBL -> R, SBS -> B, LBR -> B
+  if (prev == 'L' && curr == 'L') newMove = 'S';
+  else if (prev == 'L' && curr == 'S') newMove = 'R';
+  else if (prev == 'R' && curr == 'L') newMove = 'B';
+  else if (prev == 'S' && curr == 'L') newMove = 'R';
+  else if (prev == 'S' && curr == 'S') newMove = 'B';
+  else if (prev == 'L' && curr == 'R') newMove = 'B';
+  
+  if (newMove != '?') { 
+    currentPathArr[len-3] = newMove; 
+    *currentPathLenPtr -= 2; 
+  }
+}
+
+void printPaths() {
+  Serial3.print("Path Small: ");
+  for(int i=0; i<pathLenSmall; i++) Serial3.print(pathSmall[i]);
+  Serial3.println();
+  Serial3.print("Path Big: ");
+  for(int i=0; i<pathLenBig; i++) Serial3.print(pathBig[i]);
+  Serial3.println();
+}
+
+// --- MOVEMENT ---
 void pivotTurn90(bool leftTurn, int pwmOuterMax) {
-  // Using Code A specific ticks
   int pwm = constrain(pwmOuterMax, 40, 255);
   encoderCountL = 0; encoderCountR = 0;
   
@@ -561,11 +609,13 @@ void pivotTurn90(bool leftTurn, int pwmOuterMax) {
     if (aL >= TICKS_90_DEG || aR >= TICKS_90_DEG) break;
     delay(5);
   }
+  moveForward(BASE_PWM_STRAIGHT, BASE_PWM_STRAIGHT);
+  delay(50);
   stopMotors();
 }
 
 void pivot180(int pwmVal) {
-  const int targetCounts = 550; // Code A specific
+  const int targetCounts = 550; 
   encoderCountL = 0; encoderCountR = 0;
   pivotRight(pwmVal);
   while(absl(encoderCountL) < targetCounts || absl(encoderCountR) < targetCounts) {
@@ -600,7 +650,7 @@ void moveForwardDistance(int distance_cm, int pwmVal) {
   stopMotors();
 }
 
-// --- LINE FOLLOW HELPERS ---
+// --- SENSORS & SYSTEM ---
 void pivotLeftUntilCenter() {
   unsigned long t0 = millis();
   while (millis() - t0 < PIVOT_TIMEOUT_MS) {
@@ -619,17 +669,6 @@ void pivotRightUntilCenter() {
   }
   stopMotors();
 }
-void pivotLeft90UntilLine(int pwmVal) {
-  const long targetCounts = 560; 
-  noInterrupts(); encoderCountL = 0; encoderCountR = 0; interrupts();
-  pivotLeft(pwmVal);
-  while (absl(encoderCountL) < targetCounts) {
-    readLineSensors(); if (sensorBits != 0) break; delay(5);
-  }
-  stopMotors();
-}
-
-// --- SYSTEM ---
 void readLineSensors() {
   sensorBits = 0;
   for (int i = 0; i < 8; i++) {
@@ -639,7 +678,6 @@ void readLineSensors() {
     if (isBlack) sensorBits |= (1u << i);
   }
 }
-
 long readUltrasonic(int trigPin, int echoPin) {
   digitalWrite(trigPin, LOW);  delayMicroseconds(2);
   digitalWrite(trigPin, HIGH); delayMicroseconds(10);
@@ -648,29 +686,7 @@ long readUltrasonic(int trigPin, int echoPin) {
   if (duration == 0) return -1; 
   return duration * 0.034 / 2;
 }
-
 void stopMotors() { stopLeft(); stopRight(); }
 void brake(uint16_t ms) { stopMotors(); delay(ms); }
-
-void recordPath(char direction) {
-  path[pathLength] = direction; pathLength++; simplifyPath();
-}
-void simplifyPath() {
-  if (pathLength < 3 || path[pathLength-2] != 'B') return;
-  char prev = path[pathLength-3], curr = path[pathLength-1], newMove = '?';
-  if (prev == 'L' && curr == 'L') newMove = 'S';
-  else if (prev == 'L' && curr == 'S') newMove = 'R';
-  else if (prev == 'R' && curr == 'L') newMove = 'B';
-  else if (prev == 'S' && curr == 'L') newMove = 'R';
-  else if (prev == 'S' && curr == 'S') newMove = 'B';
-  else if (prev == 'L' && curr == 'R') newMove = 'B';
-  if (newMove != '?') { path[pathLength-3] = newMove; pathLength -= 2; }
-}
-void printPathToBluetooth() {
-  Serial3.println("MAP DONE. PATH:");
-  for(int i=0; i<pathLength; i++) Serial3.print(path[i]); 
-  Serial3.println();
-}
-
 void countEncoderL() { if (digitalRead(L_ENC_A) == digitalRead(L_ENC_B)) encoderCountL++; else encoderCountL--; }
 void countEncoderR() { if (digitalRead(R_ENC_A) == digitalRead(R_ENC_B)) encoderCountR--; else encoderCountR++; }
