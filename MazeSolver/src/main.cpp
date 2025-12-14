@@ -38,6 +38,14 @@ int maxPWM    = 130;
 int CORR_CLAMP = 70;
 
 // =======================================================
+// Wide-curve handling (TUNABLE)
+// If many sensors see black but center still sees line,
+// treat as WIDE_LINE and slow down (no pivot).
+// =======================================================
+int WIDE_BASE = 40;          // TODO tune: 35-55
+int WIDE_CLAMP = 55;         // TODO tune: 40-70
+
+// =======================================================
 // Turn & search (TUNABLE)
 // =======================================================
 const int TURN_PWM = 150;
@@ -51,6 +59,8 @@ const uint16_t SEARCH_MS = 450;
 
 // =======================================================
 // ALL BLACK handling (junction / wide tape)
+// IMPORTANT: with the "centerOn" gate below, this can stay 7.
+// If you still get false triggers on curves, try 8.
 // =======================================================
 const uint8_t ALL_BLACK_MIN = 7;
 const int COAST_PWM = 45;
@@ -84,24 +94,25 @@ void setMotor(int left, int right);
 void stopMotors();
 
 void pivotLeft();
-void pivotRight();
 void searchWhenLost();
 
 // Debug helpers
 void printBits(uint8_t b);
-void debugEvent(const char* tag, uint8_t Lc, uint8_t Cc, uint8_t Rc, uint8_t Bc);
+void debugEvent(const char* tag, const char* reason, uint8_t Lc, uint8_t Cc, uint8_t Rc, uint8_t Bc);
 void debugPid(const char* mode, uint8_t Lc, uint8_t Cc, uint8_t Rc, uint8_t Bc, int mL, int mR);
 
 // =======================================================
 // Setup
 // =======================================================
 void setup() {
-  Serial.begin(9600);
-  delay(100);
-  Serial.println("========================================");
-  Serial.println("LineFollower DEBUG BUILD (USB Serial)");
-  Serial.println("Logs: EVT=events, PID=periodic, PIV=live pivot");
-  Serial.println("========================================");
+  Serial3.begin(9600);
+  delay(150);
+
+  Serial3.println("========================================");
+  Serial3.println("LineFollower DEBUG BUILD (Serial3)");
+  Serial3.println("EVT=events  PID=periodic  PIV=live pivot  SRCH=lost search");
+  Serial3.println("LEFT-ONLY 90deg turns enabled");
+  Serial3.println("========================================");
 
   pinMode(R_RPWM, OUTPUT); pinMode(R_LPWM, OUTPUT);
   pinMode(L_RPWM, OUTPUT); pinMode(L_LPWM, OUTPUT);
@@ -116,14 +127,16 @@ void setup() {
   for (int i=0;i<8;i++) pinMode(sensorPins[i], INPUT);
 
   stopMotors();
-  delay(300);
+  delay(250);
 
-  Serial.print("CFG Kp="); Serial.print(Kp);
-  Serial.print(" Ki="); Serial.print(Ki);
-  Serial.print(" Kd="); Serial.print(Kd);
-  Serial.print(" base="); Serial.print(baseSpeed);
-  Serial.print(" max="); Serial.print(maxPWM);
-  Serial.print(" clamp="); Serial.println(CORR_CLAMP);
+  Serial3.print("CFG Kp="); Serial3.print(Kp);
+  Serial3.print(" Ki="); Serial3.print(Ki);
+  Serial3.print(" Kd="); Serial3.print(Kd);
+  Serial3.print(" base="); Serial3.print(baseSpeed);
+  Serial3.print(" max="); Serial3.print(maxPWM);
+  Serial3.print(" clamp="); Serial3.print(CORR_CLAMP);
+  Serial3.print(" wideBase="); Serial3.print(WIDE_BASE);
+  Serial3.print(" wideClamp="); Serial3.println(WIDE_CLAMP);
 }
 
 // =======================================================
@@ -140,20 +153,16 @@ void loop() {
   bool inCooldown = (millis() - lastTurnTime < TURN_COOLDOWN_MS);
 
   // =====================================================
-  // 90° CORNER DETECTION (FIXED)
-  // Rule: forward lost (center=0) + strong evidence on one side
-  // Typical L-turn: center disappears, new line appears on left side.
+  // LEFT 90° CORNER DETECTION (LEFT-ONLY MAP)
+  // Trigger when center is lost and left is strong & right is clear.
   // =====================================================
   bool forwardLost = (Cc == 0);
-  bool strongLeft  = (Lc >= 2 && Rc == 0);
-  bool strongRight = (Rc >= 2 && Lc == 0);
-  bool bothSides   = (Lc >= 2 && Rc >= 2);
-
-  bool left90  = (!inCooldown && forwardLost && strongLeft);
-  bool right90 = (!inCooldown && forwardLost && strongRight);
+  bool strongLeft  = (Lc >= 2);
+  bool rightClear  = (Rc == 0);
+  bool left90 = (!inCooldown && forwardLost && strongLeft && rightClear);
 
   if (left90) {
-    debugEvent("TURN_90_LEFT", Lc, Cc, Rc, Bc);
+    debugEvent("TURN_90_LEFT", "Cc==0 && Lc>=2 && Rc==0", Lc, Cc, Rc, Bc);
     pivotLeft();
     lastTurnTime = millis();
     integral = 0;
@@ -161,50 +170,50 @@ void loop() {
     return;
   }
 
-  if (right90) {
-    debugEvent("TURN_90_RIGHT", Lc, Cc, Rc, Bc);
-    pivotRight();
-    lastTurnTime = millis();
-    integral = 0;
-    lastError = 2.5;
-    return;
-  }
-
-  if (!inCooldown && forwardLost && bothSides) {
-    debugEvent("TURN_BOTH_SIDES", Lc, Cc, Rc, Bc);
-    if (Lc > Rc) pivotLeft();
-    else if (Rc > Lc) pivotRight();
-    else {
-      if (lastError >= 0) pivotRight();
-      else pivotLeft();
-    }
-    lastTurnTime = millis();
-    integral = 0;
-    return;
-  }
-
   // =====================================================
-  // ALL BLACK (junction / wide tape)
+  // ALL BLACK / WIDE LINE HANDLING
+  // Key fix: only treat ALL_BLACK as junction if CENTER is LOST.
+  // If center still sees line -> it's a wide curve/wide tape: slow PID.
   // =====================================================
+  bool centerOn = (Cc > 0);
+
   if (Bc >= ALL_BLACK_MIN) {
+    // CASE A: WIDE CURVE (center still on line) -> no pivot
+    if (centerOn) {
+      float e = lineError();
+      float d = e - lastError;
+      float c = (Kp * e) + (Kd * d);      // keep it responsive, no integral here
+      c = constrain(c, -WIDE_CLAMP, WIDE_CLAMP);
+      lastError = e;
+
+      int mL = constrain((int)(WIDE_BASE + c), 0, maxPWM);
+      int mR = constrain((int)(WIDE_BASE - c), 0, maxPWM);
+
+      setMotor(mL, mR);
+      debugEvent("WIDE_LINE", "Bc high but centerOn -> slow PID", Lc, Cc, Rc, Bc);
+      debugPid("WIDE_LINE_PID", Lc, Cc, Rc, Bc, mL, mR);
+      return;
+    }
+
+    // CASE B: TRUE JUNCTION (center lost) -> coast then LEFT decide
     if (allBlackStart == 0) {
       allBlackStart = millis();
-      debugEvent("ALL_BLACK_ENTER", Lc, Cc, Rc, Bc);
+      debugEvent("ALL_BLACK_ENTER", "Bc>=min && Cc==0 (junction)", Lc, Cc, Rc, Bc);
     }
 
     setMotor(COAST_PWM, COAST_PWM);
     debugPid("ALL_BLACK_COAST", Lc, Cc, Rc, Bc, COAST_PWM, COAST_PWM);
 
-    if (millis() - allBlackStart > ALL_BLACK_COAST_MS && !inCooldown) {
-      debugEvent("ALL_BLACK_DECIDE_TURN", Lc, Cc, Rc, Bc);
-      if (lastError >= 0) pivotRight();
-      else pivotLeft();
+    if ((millis() - allBlackStart > ALL_BLACK_COAST_MS) && !inCooldown) {
+      debugEvent("ALL_BLACK_LEFT_DECIDE", "junction -> pivotLeft()", Lc, Cc, Rc, Bc);
+      pivotLeft();
       lastTurnTime = millis();
       allBlackStart = 0;
     }
     return;
+
   } else {
-    if (allBlackStart != 0) debugEvent("ALL_BLACK_EXIT", Lc, Cc, Rc, Bc);
+    if (allBlackStart != 0) debugEvent("ALL_BLACK_EXIT", "Bc dropped", Lc, Cc, Rc, Bc);
     allBlackStart = 0;
   }
 
@@ -212,7 +221,7 @@ void loop() {
   // LOST LINE
   // =====================================================
   if (!anyOnLine()) {
-    debugEvent("LOST_LINE", Lc, Cc, Rc, Bc);
+    debugEvent("LOST_LINE", "bits==0 -> search", Lc, Cc, Rc, Bc);
     searchWhenLost();
     return;
   }
@@ -242,7 +251,8 @@ void loop() {
 void readSensors() {
   bits = 0;
   for (int i=0;i<8;i++) {
-    bool black = BLACK_IS_HIGH ? digitalRead(sensorPins[i]) : !digitalRead(sensorPins[i]);
+    bool raw = digitalRead(sensorPins[i]);
+    bool black = BLACK_IS_HIGH ? raw : !raw;
     s[i] = black ? 1 : 0;
     if (black) bits |= (1 << i);
   }
@@ -272,11 +282,14 @@ float lineError() {
 }
 
 // =======================================================
-// Motor (UNCHANGED)
+// Motor (mapping preserved)
 // =======================================================
 void setMotor(int left, int right) {
+  // Right forward
   analogWrite(R_RPWM, right);
   analogWrite(R_LPWM, 0);
+
+  // Left forward
   analogWrite(L_RPWM, 0);
   analogWrite(L_LPWM, left);
 }
@@ -289,19 +302,24 @@ void stopMotors() {
 }
 
 // =======================================================
-// Pivot (with live logs)
+// Pivot LEFT (fixed pivot)
+// Right forward + Left backward
 // =======================================================
 void pivotLeft() {
-  Serial.println("EVT pivotLeft start");
+  Serial3.println("EVT pivotLeft start (R fwd, L back)");
 
   unsigned long t0 = millis();
   unsigned long lastDbg = 0;
   uint8_t stable = 0;
 
   while (millis() - t0 < TURN_TIMEOUT_MS) {
-    // Your original pivotLeft behavior (UNCHANGED)
+    // Right forward
     analogWrite(R_RPWM, TURN_PWM);
+    analogWrite(R_LPWM, 0);
+
+    // Left backward
     analogWrite(L_RPWM, TURN_PWM);
+    analogWrite(L_LPWM, 0);
 
     readSensors();
 
@@ -310,12 +328,12 @@ void pivotLeft() {
 
     if (millis() - lastDbg > 80) {
       lastDbg = millis();
-      Serial.print("PIV_L dt="); Serial.print(millis() - t0);
-      Serial.print(" stable="); Serial.print(stable);
-      Serial.print(" bits="); printBits(bits);
-      Serial.print(" C="); Serial.print((int)(s[3] || s[4]));
-      Serial.print(" S="); for(int i=0;i<8;i++) Serial.print(s[i]);
-      Serial.println();
+      Serial3.print("PIV_L dt="); Serial3.print(millis() - t0);
+      Serial3.print(" stable="); Serial3.print(stable);
+      Serial3.print(" bits="); printBits(bits);
+      Serial3.print(" C="); Serial3.print((int)(s[3] || s[4]));
+      Serial3.print(" S="); for(int i=0;i<8;i++) Serial3.print(s[i]);
+      Serial3.println();
     }
 
     if (stable >= CENTER_STABLE_N) break;
@@ -323,121 +341,95 @@ void pivotLeft() {
   }
 
   stopMotors();
-  Serial.print("EVT pivotLeft done dt="); Serial.println(millis() - t0);
-}
-
-void pivotRight() {
-  Serial.println("EVT pivotRight start");
-
-  unsigned long t0 = millis();
-  unsigned long lastDbg = 0;
-  uint8_t stable = 0;
-
-  while (millis() - t0 < TURN_TIMEOUT_MS) {
-    // Your original pivotRight behavior (UNCHANGED)
-    analogWrite(R_LPWM, TURN_PWM);
-    analogWrite(L_LPWM, TURN_PWM);
-
-    readSensors();
-
-    if (s[3] || s[4]) stable++;
-    else stable = 0;
-
-    if (millis() - lastDbg > 80) {
-      lastDbg = millis();
-      Serial.print("PIV_R dt="); Serial.print(millis() - t0);
-      Serial.print(" stable="); Serial.print(stable);
-      Serial.print(" bits="); printBits(bits);
-      Serial.print(" C="); Serial.print((int)(s[3] || s[4]));
-      Serial.print(" S="); for(int i=0;i<8;i++) Serial.print(s[i]);
-      Serial.println();
-    }
-
-    if (stable >= CENTER_STABLE_N) break;
-    delay(4);
-  }
-
-  stopMotors();
-  Serial.print("EVT pivotRight done dt="); Serial.println(millis() - t0);
+  Serial3.print("EVT pivotLeft done dt="); Serial3.println(millis() - t0);
 }
 
 // =======================================================
-// Lost search (with logs)
+// Lost search (kept as before)
 // =======================================================
 void searchWhenLost() {
-  Serial.print("EVT search start dir=");
-  Serial.println(lastError >= 0 ? "RIGHT" : "LEFT");
+  const bool searchRight = (lastError >= 0);
 
-  if (lastError >= 0) {
-    analogWrite(R_LPWM, SEARCH_PWM);
-    analogWrite(L_LPWM, SEARCH_PWM);
-  } else {
-    analogWrite(R_RPWM, SEARCH_PWM);
-    analogWrite(L_RPWM, SEARCH_PWM);
-  }
+  Serial3.print("EVT search start dir=");
+  Serial3.println(searchRight ? "RIGHT" : "LEFT");
 
   unsigned long t0 = millis();
   unsigned long lastDbg = 0;
 
   while (millis() - t0 < SEARCH_MS) {
+    if (searchRight) {
+      // rotate right: right back + left fwd
+      analogWrite(R_RPWM, 0);
+      analogWrite(R_LPWM, SEARCH_PWM);
+      analogWrite(L_RPWM, 0);
+      analogWrite(L_LPWM, SEARCH_PWM);
+    } else {
+      // rotate left: right fwd + left back
+      analogWrite(R_RPWM, SEARCH_PWM);
+      analogWrite(R_LPWM, 0);
+      analogWrite(L_RPWM, SEARCH_PWM);
+      analogWrite(L_LPWM, 0);
+    }
+
     readSensors();
     if (anyOnLine()) {
       stopMotors();
-      Serial.print("EVT search reacquired dt="); Serial.println(millis() - t0);
+      Serial3.print("EVT search reacquired dt="); Serial3.println(millis() - t0);
       return;
     }
 
     if (millis() - lastDbg > 80) {
       lastDbg = millis();
-      Serial.print("SRCH dt="); Serial.print(millis() - t0);
-      Serial.print(" bits="); printBits(bits);
-      Serial.print(" S="); for(int i=0;i<8;i++) Serial.print(s[i]);
-      Serial.println();
+      Serial3.print("SRCH dt="); Serial3.print(millis() - t0);
+      Serial3.print(" bits="); printBits(bits);
+      Serial3.print(" S="); for(int i=0;i<8;i++) Serial3.print(s[i]);
+      Serial3.println();
     }
 
     delay(4);
   }
 
   stopMotors();
-  Serial.println("EVT search fail stop");
+  Serial3.println("EVT search fail stop");
 }
 
 // =======================================================
-// Debug Printers
+// Debug Printers (Serial3)
 // =======================================================
 void printBits(uint8_t b) {
-  for (int i = 7; i >= 0; i--) Serial.print((b >> i) & 1);
+  for (int i = 7; i >= 0; i--) Serial3.print((b >> i) & 1);
 }
 
-void debugEvent(const char* tag, uint8_t Lc, uint8_t Cc, uint8_t Rc, uint8_t Bc) {
+void debugEvent(const char* tag, const char* reason, uint8_t Lc, uint8_t Cc, uint8_t Rc, uint8_t Bc) {
   if (millis() - lastEventPrint < EVENT_GAP_MS) return;
   lastEventPrint = millis();
 
-  Serial.print("EVT t="); Serial.print(millis());
-  Serial.print(" "); Serial.print(tag);
-  Serial.print(" bits="); printBits(bits);
-  Serial.print(" (0x"); Serial.print(bits, HEX); Serial.print(")");
-  Serial.print(" S="); for(int i=0;i<8;i++) Serial.print(s[i]);
-  Serial.print(" L="); Serial.print(Lc);
-  Serial.print(" C="); Serial.print(Cc);
-  Serial.print(" R="); Serial.print(Rc);
-  Serial.print(" B="); Serial.println(Bc);
+  Serial3.print("EVT t="); Serial3.print(millis());
+  Serial3.print(" "); Serial3.print(tag);
+  Serial3.print(" why="); Serial3.print(reason);
+  Serial3.print(" bits="); printBits(bits);
+  Serial3.print(" (0x"); Serial3.print(bits, HEX); Serial3.print(")");
+  Serial3.print(" S="); for(int i=0;i<8;i++) Serial3.print(s[i]);
+  Serial3.print(" L="); Serial3.print(Lc);
+  Serial3.print(" C="); Serial3.print(Cc);
+  Serial3.print(" R="); Serial3.print(Rc);
+  Serial3.print(" B="); Serial3.println(Bc);
 }
 
 void debugPid(const char* mode, uint8_t Lc, uint8_t Cc, uint8_t Rc, uint8_t Bc, int mL, int mR) {
   if (millis() - lastPidPrint < PID_PRINT_MS) return;
   lastPidPrint = millis();
 
-  Serial.print("PID t="); Serial.print(millis());
-  Serial.print(" MODE="); Serial.print(mode);
-  Serial.print(" bits="); printBits(bits);
-  Serial.print(" S="); for(int i=0;i<8;i++) Serial.print(s[i]);
-  Serial.print(" L="); Serial.print(Lc);
-  Serial.print(" C="); Serial.print(Cc);
-  Serial.print(" R="); Serial.print(Rc);
-  Serial.print(" B="); Serial.print(Bc);
-  Serial.print(" err="); Serial.print(error,2);
-  Serial.print(" corr="); Serial.print(corr,2);
-  Serial.print(" mL="); Serial.print(mL);
-  Serial.print(" mR="); Serial.println(mR);
+  Serial3.print("PID t="); Serial3.print(millis());
+  Serial3.print(" MODE="); Serial3.print(mode);
+  Serial3.print(" bits="); printBits(bits);
+  Serial3.print(" S="); for(int i=0;i<8;i++) Serial3.print(s[i]);
+  Serial3.print(" L="); Serial3.print(Lc);
+  Serial3.print(" C="); Serial3.print(Cc);
+  Serial3.print(" R="); Serial3.print(Rc);
+  Serial3.print(" B="); Serial3.print(Bc);
+  Serial3.print(" err="); Serial3.print(error,2);
+  Serial3.print(" corr="); Serial3.print(corr,2);
+  Serial3.print(" mL="); Serial3.print(mL);
+  Serial3.print(" mR="); Serial3.println(mR);
 }
