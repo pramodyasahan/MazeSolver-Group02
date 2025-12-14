@@ -29,11 +29,11 @@ const uint8_t RIGHT_IDX[3]  = {5,6,7};
 // =======================================================
 // PID (TUNABLE)
 // =======================================================
-float Kp = 40.0;
+float Kp = 30.0;
 float Ki = 0.0;
 float Kd = 4.0;
 
-int baseSpeed = 55;
+int baseSpeed = 62;
 int maxPWM    = 130;
 int CORR_CLAMP = 70;
 
