@@ -1,11 +1,9 @@
 #include "wall.h"
-#include "line.h" // for stopMotors prototype if needed (stopMotors implemented here too)
+#include "line.h" 
 #include <Arduino.h>
 #include "common.h"
 
-// Implement motor helpers and wall functions (moved from original main file)
-
-// Move forward with given wheel PWM values (right, left)
+// Basic Motor Control
 void moveForward(int pwmValR, int pwmValL) {
   analogWrite(R_RPWM, pwmValR); analogWrite(R_LPWM, 0);
   analogWrite(L_RPWM, 0);       analogWrite(L_LPWM, pwmValL);
@@ -35,12 +33,13 @@ long readUltrasonic(int trigPin, int echoPin) {
   digitalWrite(trigPin, LOW);  delayMicroseconds(2);
   digitalWrite(trigPin, HIGH); delayMicroseconds(10);
   digitalWrite(trigPin, LOW);
-  long duration = pulseIn(echoPin, HIGH, 25000);
+  long duration = pulseIn(echoPin, HIGH, 25000); // 25ms timeout
   if (duration == 0) return -1;
   long distance = duration * 0.034 / 2;
   return distance;
 }
 
+// Encoder ISRs
 void countEncoderL() {
   int A = digitalRead(L_ENC_A);
   int B = digitalRead(L_ENC_B);
@@ -55,62 +54,43 @@ void countEncoderR() {
   else        { encoderCountR++;}
 }
 
-// ===============================================================
-//             180 Degree Encoder-Based Pivot
-// ===============================================================
+// 180 Pivot
 void pivot180(int pwmVal) {
-  const int targetCounts = 550; // Approximate value for 180-degree pivot
-
+  const int targetCounts = 550; 
   encoderCountL = 0;
   encoderCountR = 0;
-
   pivotRight(pwmVal);
-
   while(absl(encoderCountL) < targetCounts || absl(encoderCountR) < targetCounts) {
     if (absl(encoderCountL) >= targetCounts) { stopLeft(); }
     if (absl(encoderCountR) >= targetCounts) { stopRight(); }
     delay(5);
   }
-
   stopMotors();
 }
 
-// ===============================================================
-//                  TURNING (Arc with sync + stop-on-reach)
-// ===============================================================
+// 90 Degree Turn
 void pivotTurn90(bool leftTurn, int pwmOuterMax) {
   const long TICKS_90_DEG = 560;   
   const int pwmMin = 40;
-
   int pwm = constrain(pwmOuterMax, pwmMin, 255);
 
-  // Reset encoders
   encoderCountL = 0;
   encoderCountR = 0;
 
-  // --- Motor commands for pivot ---
   if (leftTurn) {
-    // Left turn: left wheel backward, right wheel forward
     analogWrite(L_RPWM, 0);  analogWrite(L_LPWM, 0);
     analogWrite(R_RPWM, pwm);    analogWrite(R_LPWM, 0);
   } else {
-    // Right turn: right wheel backward, left wheel forward
     analogWrite(L_RPWM, 0);    analogWrite(L_LPWM, pwm);
     analogWrite(R_RPWM, 0);  analogWrite(R_LPWM, 0);
   }
 
-  // --- Run until encoder reaches tick target ---
   while (true) {
     long aL = absl(encoderCountL);
     long aR = absl(encoderCountR);
-
-    if (aL >= TICKS_90_DEG || aR >= TICKS_90_DEG) {
-      break;
-    }
+    if (aL >= TICKS_90_DEG || aR >= TICKS_90_DEG) break;
     delay(5);
   }
-
-  // Stop both wheels
   stopLeft();
   stopRight();
 }
@@ -119,13 +99,11 @@ void smoothTurnLeft()  { pivotTurn90(true, TURN_PWM); }
 void smoothTurnRight() { pivotTurn90(false, TURN_PWM); }
 
 // ===============================================================
-//             NEW: Encoder-Based Forward Movement
+// FIXED: moveForwardWallFollow returns BOOL (true=success)
 // ===============================================================
-void moveForwardWallFollow(int distance_cm, int basePWM) {
-  if (distance_cm <= 0) return;
-
-  const float wheelCircumference = PI * WHEEL_DIAMETER_CM;
-  const long targetCounts = (long)(((float)distance_cm / wheelCircumference) * countsPerRev);
+bool moveForwardWallFollow(int distance_cm, int basePWM) {
+  
+  const int targetCounts = 525;
 
   // Reset encoders
   noInterrupts();
@@ -134,29 +112,32 @@ void moveForwardWallFollow(int distance_cm, int basePWM) {
   interrupts();
 
   unsigned long tStart = millis();
-  const unsigned long TIMEOUT_MS = max(5000UL, (unsigned long)distance_cm * 60UL); // conservative timeout
+  // Timeout: if we don't move in time, we are likely stuck
+  const unsigned long TIMEOUT_MS = max(5000UL, (unsigned long)distance_cm * 60UL); 
+
+  bool success = false;
 
   while (true) {
-    // Safety timeout
+    // 1. TIMEOUT CHECK
     if (millis() - tStart > TIMEOUT_MS) {
       stopMotors();
-      // Serial.println("moveForwardWallFollow: timeout");
+      success = false; // Failed to reach target
       break;
     }
 
-    // Encoder check
+    // 2. ENCODER CHECK
     noInterrupts();
     long aL = absl(encoderCountL);
     long aR = absl(encoderCountR);
     interrupts();
 
     if ((aL + aR) / 2 >= targetCounts) {
-      // reached distance
       stopMotors();
+      success = true; // SUCCESS
       break;
     }
 
-    // Read ultrasonics (non-blocking-ish; pulseIn still blocks)
+    // 3. SENSOR READ
     long dFront = readUltrasonic(TRIG_FRONT, ECHO_FRONT);
     long dLeft  = readUltrasonic(TRIG_LEFT,  ECHO_LEFT);
     long dRight = readUltrasonic(TRIG_RIGHT, ECHO_RIGHT);
@@ -165,32 +146,88 @@ void moveForwardWallFollow(int distance_cm, int basePWM) {
     bool leftValid  = dLeft  > 0;
     bool rightValid = dRight > 0;
 
-    // Obstacle immediately ahead: stop and choose avoidance
-    if (frontValid && dFront < OBSTACLE_THRESHOLD) {
-      stopMotors();
-      delay(50);
-      // Align / decide turn like wallFollowingMode
-      bool turnLeft = (dLeft > dRight);
-      bool isUTurn = false;
-      if (turnLeft && dLeft > OPEN_SPACE_THRESHOLD_CM)   isUTurn = true;
-      if (!turnLeft && dRight > OPEN_SPACE_THRESHOLD_CM) isUTurn = true;
+    // 5. WALL FOLLOW PID
+    int leftPWM = basePWM;
+    int rightPWM = basePWM;
 
-      if (!isUTurn && leftValid && rightValid && (abs(dLeft - dRight) > ALIGN_TOLERANCE_CM)) {
-        if (dLeft < dRight) { pivotLeft(ALIGN_PWM); }
-        else                { pivotRight(ALIGN_PWM); }
-        delay(ALIGN_DURATION_MS);
-        stopMotors();
-        delay(50);
-      }
-
-      if (turnLeft) smoothTurnLeft();
-      else          smoothTurnRight();
-
-      // after avoidance, continue outer loop which will re-evaluate encoders/timeouts
-      continue;
+    if (leftValid && rightValid && dLeft < WALL_DETECT_RANGE && dRight < WALL_DETECT_RANGE) {
+      int we = (int)(dLeft - dRight);
+      int corr = (int)(Kp_Wall * we);
+      corr = constrain(corr, -MAX_CORRECTION, MAX_CORRECTION);
+      leftPWM  = constrain(basePWM - corr, 0, 255);
+      rightPWM = constrain(basePWM + corr, 0, 255);
+    } else if (leftValid && dLeft < 10) {
+      int targetDist = 6;
+      int we = (int)(targetDist - dLeft);
+      int corr = (int)(Kp_Wall * we);
+      corr = constrain(corr, -MAX_CORRECTION, MAX_CORRECTION);
+      leftPWM  = constrain(basePWM + corr, 0, 255);
+      rightPWM = constrain(basePWM - corr, 0, 255);
+    } else if (rightValid && dRight < 10) {
+      int targetDist = 6;
+      int we = (int)(targetDist - dRight);
+      int corr = (int)(Kp_Wall * we);
+      corr = constrain(corr, -MAX_CORRECTION, MAX_CORRECTION);
+      leftPWM  = constrain(basePWM - corr, 0, 255);
+      rightPWM = constrain(basePWM + corr, 0, 255);
     }
 
-    // WALL FOLLOW PID (dual-wall, left-wall or right-wall fallback)
+    analogWrite(R_RPWM, rightPWM); analogWrite(R_LPWM, 0);
+    analogWrite(L_RPWM, 0); analogWrite(L_LPWM, leftPWM);
+    delay(8);
+  }
+
+  stopMotors();
+  delay(500);
+  return success;
+}
+
+bool moveBackwardWallFollow(int basePWM) {
+  
+  const int targetCounts = 280;
+
+  // Reset encoders
+  noInterrupts();
+  encoderCountL = 0;
+  encoderCountR = 0;
+  interrupts();
+
+  unsigned long tStart = millis();
+  // Timeout: if we don't move in time, we are likely stuck
+  const unsigned long TIMEOUT_MS = 1500UL; 
+
+  bool success = false;
+
+  while (true) {
+    // 1. TIMEOUT CHECK
+    if (millis() - tStart > TIMEOUT_MS) {
+      stopMotors();
+      success = false; // Failed to reach target
+      break;
+    }
+
+    // 2. ENCODER CHECK
+    noInterrupts();
+    long aL = absl(encoderCountL);
+    long aR = absl(encoderCountR);
+    interrupts();
+
+    if ((aL + aR) / 2 >= targetCounts) {
+      stopMotors();
+      success = true; // SUCCESS
+      break;
+    }
+
+    // 3. SENSOR READ
+    long dFront = readUltrasonic(TRIG_FRONT, ECHO_FRONT);
+    long dLeft  = readUltrasonic(TRIG_LEFT,  ECHO_LEFT);
+    long dRight = readUltrasonic(TRIG_RIGHT, ECHO_RIGHT);
+
+    bool frontValid = dFront > 0;
+    bool leftValid  = dLeft  > 0;
+    bool rightValid = dRight > 0;
+
+    // 5. WALL FOLLOW PID
     int leftPWM = basePWM;
     int rightPWM = basePWM;
 
@@ -214,28 +251,18 @@ void moveForwardWallFollow(int distance_cm, int basePWM) {
       corr = constrain(corr, -MAX_CORRECTION, MAX_CORRECTION);
       leftPWM  = constrain(basePWM - corr, 0, 255);
       rightPWM = constrain(basePWM + corr, 0, 255);
-    } else {
-      // no good wall info — drive straight at basePWM
-      leftPWM = basePWM;
-      rightPWM = basePWM;
     }
 
-    // Apply PWMs (rightSpeed, leftSpeed ordering in your helpers)
-    analogWrite(R_RPWM, rightPWM); analogWrite(R_LPWM, 0);
-    analogWrite(L_RPWM, 0); analogWrite(L_LPWM, leftPWM);
-
-    // small delay for loop timing
+    analogWrite(R_RPWM, 0); analogWrite(R_LPWM, leftPWM);
+    analogWrite(L_RPWM, rightPWM); analogWrite(L_LPWM, 0);
     delay(8);
   }
 
-  // ensure stop & short settle
   stopMotors();
-  delay(40);
+  delay(500);
+  return success;
 }
-
-// ===============================================================
-//                 WALL FOLLOWING MODE FUNCTION
-// ===============================================================
+// General Wall Following (Infinite Mode)
 void wallFollowingMode() {
   long dFront = readUltrasonic(TRIG_FRONT, ECHO_FRONT);
   long dLeft  = readUltrasonic(TRIG_LEFT,  ECHO_LEFT);
@@ -245,16 +272,12 @@ void wallFollowingMode() {
   bool leftValid  = dLeft  > 0;
   bool rightValid = dRight > 0;
 
+  // Debug output
   Serial.print("F:"); Serial.print(dFront);
   Serial.print(" L:"); Serial.print(dLeft);
   Serial.print(" R:"); Serial.println(dRight);
 
-  // Mirror to Bluetooth
-  Serial3.print("F:"); Serial3.print(dFront);
-  Serial3.print(" L:"); Serial3.print(dLeft);
-  Serial3.print(" R:"); Serial3.println(dRight);
-
-  // ---------- STATE 1: Dead End ----------
+  // Dead End
   if (frontValid && dFront < OBSTACLE_THRESHOLD &&
       leftValid  && dLeft  < DEAD_END_THRESHOLD &&
       rightValid && dRight < DEAD_END_THRESHOLD)
@@ -265,45 +288,42 @@ void wallFollowingMode() {
       stopMotors();
       delay(100);
   }
-  // ---------- STATE 2: Obstacle Ahead ----------
+  // Obstacle Ahead
   else if (frontValid && dFront < OBSTACLE_THRESHOLD) {
     stopMotors();
     delay(100);
-
     bool turnLeft = (dLeft > dRight);
+    
+    // Check for open space
     bool isUTurn = false;
     if (turnLeft && dLeft > OPEN_SPACE_THRESHOLD_CM)   isUTurn = true;
     if (!turnLeft && dRight > OPEN_SPACE_THRESHOLD_CM) isUTurn = true;
 
+    // Align if stuck in corner
     if (!isUTurn && leftValid && rightValid && (abs(dLeft - dRight) > ALIGN_TOLERANCE_CM)) {
-      Serial.println("--- Aligning ---");
-      Serial3.println("BT: Aligning");
       if (dLeft < dRight) { pivotLeft(ALIGN_PWM); }
       else                { pivotRight(ALIGN_PWM); }
       delay(ALIGN_DURATION_MS);
       stopMotors();
       delay(100);
     }
-
     if (turnLeft) smoothTurnLeft();
     else          smoothTurnRight();
-
     stopMotors();
     delay(100);
   }
-  // ---------- STATE 3: No Wall on Left ----------
+  // Left Wall Gap
   else if (leftValid && dLeft > NO_WALL_THRESHOLD) {
-    moveForwardDistance(CORNER_CLEARANCE_CM, BASE_PWM_STRAIGHT);
+    moveForwardWallFollow(CORNER_CLEARANCE_CM, BASE_PWM_STRAIGHT);
     stopMotors();
     delay(10);
     smoothTurnLeft();
     stopMotors();
     delay(150);
   }
-  // ---------- STATE 4: Path Clear (Follow Wall) ----------
+  // Follow Wall
   else {
-    int leftSpeed, rightSpeed;
-
+    int leftSpeed = BASE_PWM_STRAIGHT, rightSpeed = BASE_PWM_STRAIGHT;
     if (leftValid && rightValid && dLeft < WALL_DETECT_RANGE && dRight < WALL_DETECT_RANGE) {
       int error = (int)(dLeft - dRight);
       int correction = (int)(Kp_Wall * error);
@@ -327,12 +347,7 @@ void wallFollowingMode() {
       leftSpeed  = constrain(BASE_PWM_STRAIGHT - correction, 0, 100);
       rightSpeed = constrain(BASE_PWM_STRAIGHT + correction, 0, 100);
     }
-    else {
-      leftSpeed = BASE_PWM_STRAIGHT;
-      rightSpeed = BASE_PWM_STRAIGHT;
-    }
     moveForward(rightSpeed, leftSpeed);
   }
-
   delay(10);
 }

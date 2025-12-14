@@ -120,11 +120,14 @@ static void rotateToFace(Dir target)
   if (diff >= 3) diff -= 4;
 
   if (diff == 1 || diff == -3) {
-    smoothTurnLeft();
-  } else if (diff == -1 || diff == 3) {
     smoothTurnRight();
+    moveBackwardWallFollow(BASE_PWM_STRAIGHT); // centering to the cell
+  } else if (diff == -1 || diff == 3) {
+    smoothTurnLeft();
+    moveBackwardWallFollow(BASE_PWM_STRAIGHT); // centering to the cell
   } else if (abs(diff) == 2) {
     pivot180(PIVOT_180_PWM);
+    moveBackwardWallFollow(BASE_PWM_STRAIGHT); // centering to the cell
   }
   rface = target;
   delay(80);

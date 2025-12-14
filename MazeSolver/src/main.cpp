@@ -51,7 +51,7 @@ const int NO_WALL_THRESHOLD       = 25;
 const int CORNER_CLEARANCE_CM     = 10;
 
 // ==================== Wall Following ====================
-const int   BASE_PWM_STRAIGHT = 60;
+const int   BASE_PWM_STRAIGHT = 40;
 const float Kp_Wall           = 3.5f;
 const int   MAX_CORRECTION    = 20;
 const int   WALL_DETECT_RANGE = 20;
@@ -102,7 +102,7 @@ float error = 0, lastError = 0;
 float integral = 0, derivative = 0, correction = 0;
 
 // ==================== Mode State ====================
-bool wallMode = true;
+bool wallMode = false; // false = line mode, true = wall mode
 
 void setup() {
   Serial.begin(9600);
@@ -131,7 +131,7 @@ void setup() {
 
 void loop() {
   // Flood controller will read SEARCH_MODE pin: LOW => scan, HIGH => solve
-  runFloodController();
+  lineFollowingMode();
 
   // keep loop idle until user toggles mode or robot finishes
   delay(200);

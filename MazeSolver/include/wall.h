@@ -5,7 +5,12 @@
 
 // Prototypes for wall-related functions
 void wallFollowingMode();
+<<<<<<< Updated upstream
 void moveForwardWallFollow(int distance_cm, int pwmVal);
+=======
+bool moveForwardWallFollow(int distance_cm, int pwmVal);
+bool moveBackwardWallFollow(int pwmVal);
+>>>>>>> Stashed changes
 void pivot180(int pwmVal);
 void smoothTurnLeft();
 void smoothTurnRight();
