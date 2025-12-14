@@ -244,11 +244,13 @@ void wallFollowerSolvingUpdate() {
         moveForwardDistance(CORNER_CLEARANCE_CM, BASE_PWM_STRAIGHT);
         stopMotors(); delay(10);
         smoothTurnLeft();
+        moveForward(BASE_PWM_STRAIGHT, BASE_PWM_STRAIGHT); delay(100);
         stopMotors(); delay(100);
       } else if (move == 'R') {
         moveForwardDistance(CORNER_CLEARANCE_CM, BASE_PWM_STRAIGHT);
         stopMotors(); delay(10);
         smoothTurnRight();
+        moveForward(BASE_PWM_STRAIGHT, BASE_PWM_STRAIGHT); delay(100);
         stopMotors(); delay(100);
       } else if (move == 'S') {
         moveForwardDistance(15, BASE_PWM_STRAIGHT);
