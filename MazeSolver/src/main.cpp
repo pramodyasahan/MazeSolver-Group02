@@ -249,17 +249,27 @@ void loop() {
   const bool fullBlackNow = (ls.blackCount == FULL_BLACK_COUNT);
   const bool fullBlack    = debounceHold(fullBlackNow, fullBlackStartMs, FULL_BLACK_CONFIRM_MS);
 
-  // Optional ultrasonic confirm only while TRANS_TO_MAZE2
+  // Ultrasonic confirm (used for Line->Maze2 decision as well)
   bool wallsDetected = false;
   long dL = -1, dR = -1;
-  if (currentState == STATE_TRANS_TO_MAZE2) {
+
+  // Read ultrasonics when we are in line-follow OR transition-to-maze2
+  if (currentState == STATE_LINE_FOLLOW ||
+      currentState == STATE_SOLVING_LINE ||
+      currentState == STATE_TRANS_TO_MAZE2) {
+
     dL = readUltrasonicCm(TRIG_LEFT,  ECHO_LEFT);
     dR = readUltrasonicCm(TRIG_RIGHT, ECHO_RIGHT);
-    bool wallsNow = ((dL > 0 && dL < WALL_RANGE_CM) || (dR > 0 && dR < WALL_RANGE_CM));
+
+    // REQUIRE TWO SIDE WALLS (left AND right) within range
+    bool wallsNow = (dL > 0 && dL < WALL_RANGE_CM) &&
+                    (dR > 0 && dR < WALL_RANGE_CM);
+
     wallsDetected = debounceHold(wallsNow, wallStartMs, WALL_CONFIRM_MS);
   } else {
     wallStartMs = 0;
   }
+
 
   // Live debug during transitions + line states (throttled)
   if (currentState == STATE_TRANS_TO_LINE ||
@@ -339,7 +349,9 @@ void loop() {
     // ---------------------------
     case STATE_LINE_FOLLOW: {
       // Detect entry to big maze floor (FULL BLACK) -> STOP-HOLD -> TRANS_TO_MAZE2
-      if (fullBlack) {
+      // Detect entry to big maze floor: FULL BLACK AND TWO SIDE WALLS -> STOP-HOLD -> TRANS_TO_MAZE2
+      if (fullBlack && wallsDetected) {
+
         if (lineMazeStopStartMs == 0) {
           lineMazeStopStartMs = millis();
           motorsStop();
@@ -488,7 +500,8 @@ void loop() {
     // FIX: exit line on FULL BLACK (not white)
     // ---------------------------
     case STATE_SOLVING_LINE: {
-      if (fullBlack) {
+      if (fullBlack && wallsDetected) {
+
         DBG_PORT.print("EVT t="); DBG_PORT.print(millis());
         DBG_PORT.println(" FULL BLACK (solve line->maze) -> STOP-HOLD");
 
@@ -535,5 +548,5 @@ void loop() {
     default:
       motorsStop();
       break;
-  }
+  } // switch currentState
 }
